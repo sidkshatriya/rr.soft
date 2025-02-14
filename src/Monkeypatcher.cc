@@ -1490,7 +1490,7 @@ static remote_ptr<void> resolve_address(ElfReader& reader, uintptr_t elf_addr,
   if (!reader.addr_to_offset(elf_addr, file_offset)) {
     LOG(warn) << "ELF address " << HEX(elf_addr) << " not in file";
   }
-  if (file_offset < map_offset || file_offset + 32 > map_offset + map_size) {
+  if (file_offset < map_offset || file_offset > map_offset + map_size) {
     // The value(s) to be set are outside the mapped range. This happens
     // because code and data can be mapped in separate, partial mmaps in which
     // case some symbols will be outside the mapped range.
