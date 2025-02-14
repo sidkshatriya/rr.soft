@@ -1949,7 +1949,8 @@ static remote_ptr<void> base_addr_from_rendezvous(Task* t, string fname)
   }
   string ld_path = t->vm()->saved_ld_path();
   if (ld_path.length() == 0) {
-    FATAL() << "Failed to retrieve interpreter name with interpreter_base=" << interpreter_base;
+    LOG(warn) << "Failed to retrieve interpreter name with interpreter_base=" << interpreter_base;
+    return nullptr;
   }
   ScopedFd ld(ld_path.c_str(), O_RDONLY);
   if (ld < 0) {

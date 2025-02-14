@@ -36,6 +36,7 @@ const uintptr_t X86_ID_FLAG = 1 << 21;
 
 const uintptr_t AARCH64_DBG_SPSR_SS = 1 << 21;
 const uintptr_t AARCH64_DBG_SPSR_11 = 1 << 11;
+const uintptr_t AARCH64_DBG_SPSR_12 = 1 << 12;
 
 /**
  * A Registers object contains values for all general-purpose registers.
@@ -405,6 +406,43 @@ public:
 
   // End of X86-specific stuff
   // Begin aarch64 specific accessors
+
+  // return value of method:
+  //   n - bit 3
+  //   z - bit 2
+  //   c - bit 1
+  //   v - bit 0
+  uint8_t nzcv() const {
+    DEBUG_ASSERT(arch() == aarch64);
+    return (u.arm64regs.pstate & 0xf000'0000) >> 28;
+  }
+
+  // input to method:
+  //   n - bit 3
+  //   z - bit 2
+  //   c - bit 1
+  //   v - bit 0
+  void set_nzcv(uint8_t nzcv) {
+    DEBUG_ASSERT(arch() == aarch64);
+    u.arm64regs.pstate = (u.arm64regs.pstate & 0x0fff'ffff) | uint32_t(nzcv & 0xf) << 28;
+  }
+
+  uint8_t n() const {
+    return nzcv() >> 3;
+  }
+
+  uint8_t z() const {
+    return (nzcv() & 0x4) >> 2;
+  }
+
+  uint8_t c() const {
+    return (nzcv() & 0x2) >> 1;
+  }
+
+  uint8_t v() const {
+    return (nzcv() & 0x1);
+  }
+
   uintptr_t pstate() const {
     DEBUG_ASSERT(arch() == aarch64);
     return u.arm64regs.pstate;
@@ -420,8 +458,11 @@ public:
     u.arm64regs.x[regno] = val;
   }
 
+  // This method only works if 0 <= regno < 31
+  // because x(31) can either mean xzr or sp; it depends on instruction ...
   uintptr_t x(unsigned regno) const {
     DEBUG_ASSERT(arch() == aarch64 && regno < 31);
+    assert(regno < 31);
     return u.arm64regs.x[regno];
   }
   // End of aarch64 specific accessors

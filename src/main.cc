@@ -173,7 +173,7 @@ bool parse_global_option(std::vector<std::string>& args) {
       flags.forced_uarch = opt.value;
       break;
     case 'W':
-#if defined(__x86_64__)
+#if defined(__aarch64__) || defined(__x86_64__)
       LOG(info) << "Using software counters mode";
       {
         char *env_var = getenv("DEBUGINFOD_URLS");

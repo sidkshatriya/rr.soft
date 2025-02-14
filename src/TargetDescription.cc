@@ -78,6 +78,9 @@ FeatureStream& operator<<(FeatureStream& stream, TargetFeature feature) {
     case TargetFeature::FPU:
       stream << "fpu.xml";
       break;
+    case TargetFeature::PAuth:
+      stream << "pauth.xml";
+      break;
   }
   stream << R"("/>)" << '\n';
   return stream;
@@ -119,6 +122,11 @@ TargetDescription::TargetDescription(rr::SupportedArch arch,
   if (cpu_features & rr::GdbServerConnection::CPU_PKU) {
     DEBUG_ASSERT((arch == rr::x86 || arch == rr::x86_64) && "unexpected arch");
     target_features.push_back(TargetFeature::PKeys);
+  }
+
+  if (cpu_features & rr::GdbServerConnection::CPU_AARCH64_PAUTH) {
+    DEBUG_ASSERT((arch == rr::aarch64) && "unexpected arch");
+    target_features.push_back(TargetFeature::PAuth);
   }
 }
 

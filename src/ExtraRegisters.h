@@ -176,6 +176,7 @@ private:
   Format format_;
   SupportedArch arch_;
   std::vector<uint8_t> data_;
+  ARM64Arch::user_pac_mask user_pac_mask;
 };
 
 } // namespace rr

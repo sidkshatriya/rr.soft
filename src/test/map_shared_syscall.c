@@ -5,7 +5,7 @@
 /* Tests that we can do a syscall from a syscall instruction located on a
    MAP_SHARED page */
 
-static uintptr_t my_syscall(uintptr_t syscall, uintptr_t arg1) {
+static uintptr_t my_syscall__no_soft_cnt(uintptr_t syscall, uintptr_t arg1) {
   uintptr_t ret;
 #ifdef __x86_64__
   __asm__ volatile("syscall\n\t" : "=a"(ret) : "a"(syscall), "D"(arg1));
@@ -22,12 +22,12 @@ static uintptr_t my_syscall(uintptr_t syscall, uintptr_t arg1) {
   return ret;
 }
 
-void my_brk(uintptr_t brk) { my_syscall(SYS_brk, brk); }
+void my_brk__no_soft_cnt(uintptr_t brk) { my_syscall__no_soft_cnt(SYS_brk, brk); }
 
 static uint64_t my_brk_file_offset;
 
 static void callback(__attribute__((unused)) uint64_t env, __attribute__((unused)) char* name, map_properties_t* props) {
-  uint64_t addr = (uintptr_t)my_brk;
+  uint64_t addr = (uintptr_t)my_brk__no_soft_cnt;
   if (props->start <= addr && addr < props->end) {
     my_brk_file_offset = addr - props->start + props->offset;
   }

@@ -46,10 +46,6 @@ if(NOT (CMAKE_C_COMPILER_ID STREQUAL CMAKE_CXX_COMPILER_ID))
   message(FATAL_ERROR "Both C and C++ compilers need to be either both from GNU family or Clang family. They cannot differ")
 endif()
 
-if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
-  message(FATAL_ERROR "This release does not have support for aarch64")
-endif()
-
 # "Do not add flags to export symbols from executables without the ENABLE_EXPORTS target property."
 # This avoids linking executables with -rdynamic. -rdynamic has been observed
 # to cause rr_exec_stub to be linked with the dynamic linker with some
@@ -139,7 +135,10 @@ set(has_syscallbuf false)
 if (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
   set(has_syscallbuf true)
   set(supports32bit false)
-  set(FLAGS_COMMON "${FLAGS_COMMON} -march=armv8-a+lse -Wno-error=asm-operand-widths")
+  if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    set(FLAGS_COMMON "${FLAGS_COMMON} -Wno-error=asm-operand-widths")
+  endif()
+  set(FLAGS_COMMON "${FLAGS_COMMON} -march=armv8-a+lse")
   set(PRELOAD_LIBRARY_PAGE_SIZE 65536)
   set(VDSO_NAME "LINUX_2.6.39")
   set(VDSO_SYMBOLS "__kernel_clock_getres; __kernel_rt_sigreturn; __kernel_gettimeofday; __kernel_clock_gettime;")

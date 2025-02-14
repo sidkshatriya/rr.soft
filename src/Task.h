@@ -30,6 +30,23 @@ struct syscallbuf_record;
 
 namespace rr {
 
+// b.cond or bc.cond or cbz or cbnz or tbz or tbnz
+inline __attribute__((always_inline))
+bool is_conditional_branch_aarch64(uint32_t instr) {
+  return instr >> 24 == 0b0'101010'0 ||
+         (((instr >> 24) & 0b0'111111'0) == 0b0'011010'0) ||
+         (((instr >> 24) & 0b0'111111'0) == 0b0'011011'0);
+}
+
+// Example: ldaxr
+inline __attribute__((always_inline)) bool is_exclusive_load_aarch64(uint32_t instr) {
+  // check if there is any lda?x* instruction
+  if (((instr >> 16) & 0b00'111111'110'11111) == 0b00'001000'010'11111) {
+    return true;
+  }
+  return false;
+}
+
 class AutoRemoteSyscalls;
 class RecordSession;
 class ReplaySession;
@@ -537,6 +554,8 @@ public:
    * Read the (architecture-specific) pointer authentication keys of the current task
    */
   std::vector<uint8_t> pac_keys(bool *ok = nullptr);
+
+  ARM64Arch::user_pac_mask pac_mask(bool *ok = nullptr);
 
   /**
    * Set the (architecture-specific) pointer authentication keys for the current task

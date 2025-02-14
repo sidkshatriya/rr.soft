@@ -1245,6 +1245,18 @@ const ExtraRegisters* Task::extra_regs_fallible() {
       return nullptr;
     }
     extra_registers.data_.resize(vec.iov_len);
+
+    LOG(debug) << "  (obtaining pointer authentication data mask and instruction mask) ";
+    bool ok = true;
+    extra_registers.user_pac_mask = pac_mask(&ok);
+    if (!ok) {
+      LOG(warn) << "  Not able to obtain pointer authentication masks";
+    } else {
+      LOG(debug) << " pauth data mask: "
+                 << HEX(extra_registers.user_pac_mask.data_mask)
+                 << " pauth insn mask: "
+                 << HEX(extra_registers.user_pac_mask.insn_mask);
+    }
 #else
 #error need to define new extra_regs support
 #endif
@@ -1310,6 +1322,19 @@ bool Task::get_aarch64_debug_regs(int which, ARM64Arch::user_hwdebug_state *regs
   ASSERT(this, which == NT_ARM_HW_BREAK || which == NT_ARM_HW_WATCH);
   fallible_ptrace(PTRACE_GETREGSET, which, (void*)&iov);
   return errno == 0;
+}
+
+// Assume the pac mask is the same during record and replay
+ARM64Arch::user_pac_mask Task::pac_mask(bool *ok)
+{
+  ARM64Arch::user_pac_mask mask = {0, 0};
+  struct iovec iovec = { &mask, sizeof(mask) };
+  if (fallible_ptrace(PTRACE_GETREGSET, NT_ARM_PAC_MASK, &iovec)) {
+    if (ok) {
+      *ok = false;
+    }
+  }
+  return mask;
 }
 std::vector<uint8_t> Task::pac_keys(bool *ok)
 {
@@ -4775,6 +4800,123 @@ static bool jump_stub_condition_x64_is_true(Task& t, const Registers& r, size_t 
 #endif
 }
 
+// Given a conditional branch in the counting stub at `cond_br` and knowing the
+// Registers `r` where will the code jump to after the counting stub exits ?
+static remote_code_ptr jump_ip_aarch64(Task& t, remote_ptr<uint32_t> cond_br,
+                               const Registers& r) {
+  const uint32_t cond_instr = t.read_mem(cond_br);
+  bool jump_taken = false;
+  // b.cond or bc.cond
+  if (cond_instr >> 24 == 0x54) {
+    const uint8_t cond_bits = (cond_instr & 0xf);
+    const uint8_t cond_bit_0 = (cond_instr & 0x1);
+    const uint8_t cond_bits_3to1 = cond_bits >> 1;
+
+    // Based on knowledge of nzcv and cond_bits, it is possible to know whether
+    // bc.cond/b.cond branch will be taken or not.
+    // Meaning of `cond_bits` is as per the A64 armv8+ A profile instruction set
+    // encoding of b.cond/bc.cond. Here the code is essentially emulating a single
+    // b.cond/bc.cond instruction.
+    switch (cond_bits_3to1) {
+      case 0x0:
+        jump_taken = r.z();
+        break;
+      case 0x1:
+        jump_taken = r.c();
+        break;
+      case 0x2:
+        jump_taken = r.n();
+        break;
+      case 0x3:
+        jump_taken = r.v();
+        break;
+      case 0x4:
+        jump_taken = !bool(r.z()) && bool(r.c());
+        break;
+      case 0x5:
+        jump_taken = (r.n() == r.v());
+        break;
+      case 0x6:
+        jump_taken = !bool(r.z()) && (r.n() == r.v());
+        break;
+      case 0x7:
+        jump_taken = true;
+        break;
+      default:
+        ASSERT(&t, false);
+    }
+    if (cond_bits != 0xf && cond_bit_0) {
+      jump_taken = !jump_taken;
+    }
+  }
+  // cbz or cbnz
+  else if (((cond_instr >> 24) & 0b0111'1110) == 0b0011'0100) {
+    // essentially emulate cbz/cbnz instruction as various registers are known
+    const bool use_64bit = cond_instr >> 31;
+    const bool is_cbnz = (cond_instr >> 24) & 0x1;
+    const uint8_t which_reg = cond_instr & 0b1'1111;
+    uint64_t reg_val;
+    if (which_reg == 31) {
+      reg_val = 0;
+    } else {
+      reg_val = r.x(which_reg);
+    }
+    if (!use_64bit) {
+      reg_val = reg_val & 0xffff'ffff;
+    }
+    // cbz
+    jump_taken = reg_val == 0;
+    // cbnz
+    if (is_cbnz) {
+      jump_taken = !jump_taken;
+    }
+  }
+  // tbz or tbnz
+  else if (((cond_instr >> 24) & 0b0111'1110) == 0b0011'0110) {
+    // essentially emulate tbz/tbnz instruction as various registers are known
+    const bool is_tbnz = (cond_instr >> 24) & 0x1;
+    const uint8_t which_reg = cond_instr & 0b1'1111;
+    const uint8_t which_bit = (cond_instr >> 31) << 5 | ((cond_instr >> 19) & 0x1f);
+    uint64_t reg_val;
+    if (which_reg == 31) {
+      reg_val = 0;
+    } else {
+      reg_val = r.x(which_reg);
+    }
+    const uint64_t test_bit_val = reg_val & (0x1UL << which_bit);
+    // tbz
+    jump_taken = test_bit_val == 0;
+    // tbnz
+    if (is_tbnz) {
+      jump_taken = !jump_taken;
+    }
+  } else {
+    // Only support b.cond, bc.cond, cbz, cbnz right now
+    LOG(error) << "Unexpected instruction " << HEX(cond_instr);
+    ASSERT(&t, false);
+  }
+
+  remote_ptr<uint32_t> br_ip;
+  uint32_t br_instr;
+  if (jump_taken) {
+    // as per stub, if a jump is taken, it is *always* 8 bytes i.e. two 32 bit words away
+    br_ip = cond_br + 2;
+    br_instr = t.read_mem(br_ip);
+  } else {
+    // as per stub, if a jump is NOT taken, means go to next instruction i.e. one 32 bit word
+    // away
+    br_ip = cond_br + 1;
+    br_instr = t.read_mem(br_ip);
+  }
+  int64_t branch_delta = (br_instr & 0x3FF'FFFF) << 2;
+  // sign extend
+  if (branch_delta & 0x800'0000) {
+    branch_delta = branch_delta | 0xFFFF'FFFF'F000'0000UL;
+  }
+  const remote_ptr<void> new_ip = br_ip.cast<void>() + branch_delta;
+  return remote_code_ptr(new_ip.as_int());
+}
+
 bool Task::must_avoid_move_out_of_dynamic_software_counter_stub(
     remote_ptr<void> faulting_sp) {
   if (stop_sig() == SIGBUS) {
@@ -4998,6 +5140,279 @@ bool maybe_move_out_of_dynamic_software_counter_stub_arch<X64Arch>(Task& t) {
   return true;
 }
 
+template<>
+// Assumes code is in software counter stub
+bool maybe_move_out_of_dynamic_software_counter_stub_arch<ARM64Arch>(Task &t) {
+  auto r = t.regs();
+  DEBUG_ASSERT(t.is_in_dynamic_software_counter_patch_stub(r.ip()));
+
+  LOG(debug)
+      << "Moving program out of dynamic software counter patch stub, ip(): "
+      << r.ip();
+
+  const remote_ptr<uint32_t> addr = r.ip().to_data_ptr<uint32_t>();
+  const uint32_t instr = t.read_mem(addr);
+
+  //  0 0xa9bf23e1 stp	x1, x8, [sp, #-16]!
+  //  4 0xa9bf47f0 stp	x16, x17, [sp, #-16]!
+  //  8 0xd53b4201 mrs	x1, nzcv
+  // 12 0x52800028 mov	w8, #0x1
+  // 16 0x52809411 mov	w17, #0x4a0
+  // 20 0x72ae0031 movk	w17, #0x7001, lsl #16
+  // 24 0xf8280230 ldadd	x8, x16, [x17]
+  // 28 0xa9404630 ldp	x16, x17, [x17]
+  // 32 0xeb11021f cmp	x16, x17
+  // 36 0x5400004b b.lt	#8
+  // 40 0xd4200000 brk	#0x0
+  // 44 0xd51b4201 msr	nzcv, x1
+  // 48 0xa8c147f0 ldp	x16, x17, [sp], #16
+  // 52 0xa8c123e1 ldp	x1, x8, [sp], #16
+  // 56 0x00000000 udf	#0
+  // 60 0x14000000 b	#0
+  // 64 0x14000000 b	#0
+
+  // 60/64 unconditional `b` instruction
+  // Could be the last one in the stub or the second last one; doesn't matter
+  if (instr >> 26 == 0x5) {
+    remote_code_ptr ip;
+    // relative offset back to the normal user code from the stub
+    int64_t branch_delta = (instr & 0x3FF'FFFF) << 2;
+    // sign extend
+    if (branch_delta & 0x800'0000) {
+      branch_delta = branch_delta | 0xFFFF'FFFF'F000'0000UL;
+    }
+    ip = r.ip() + branch_delta;
+    r.set_ip(ip);
+  } else {
+    // represents the value x1, x8, x16 and x17 will take when the stub exits
+    uint64_t x1, x8, x16, x17;
+    // represents the value sp will take when the stub exits
+    remote_ptr<void> sp;
+    // ip at which the conditional instruction is in the stub
+    // i.e. b.cond/bc.cond, tbz/tbnz, cbz/cbnz etc.
+    remote_ptr<uint32_t> ip_cond_br;
+    // represents the value nzcv will take when the stub exits
+    uint8_t nzcv;
+    //  0 0xa9bf23e1 stp	x1, x8, [sp, #-16]!
+    if (instr == 0xa9bf23e1) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xa9bf23e1 stp	x1, x8, [sp, #-16]!";
+      x8 = r.x(8);
+      x1 = r.x(1);
+      x17 = r.x(17);
+      x16 = r.x(16);
+      nzcv = r.nzcv();
+      sp = r.sp();
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 14;
+      if (t.must_avoid_move_out_of_dynamic_software_counter_stub(r.sp() - 16)) {
+        return false;
+      }
+      t.session().accumulate_ticks_processed(1);
+      t.ticks += 1;
+    }
+    //  4 0xa9bf47f0 stp	x16, x17, [sp, #-16]!
+    else if (instr == 0xa9bf47f0) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xa9bf47f0 stp	x16, x17, [sp, #-16]!";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x1 = t.read_mem(r.sp().cast<uint64_t>());
+      x17 = r.x(17);
+      x16 = r.x(16);
+      nzcv = r.nzcv();
+      sp = r.sp() + 16;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 13;
+      if (t.must_avoid_move_out_of_dynamic_software_counter_stub(r.sp() - 16)) {
+        return false;
+      }
+      t.session().accumulate_ticks_processed(1);
+      t.ticks += 1;
+    }
+    //  8 0xd53b4201 mrs	x1, nzcv
+    else if (instr == 0xd53b4201) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xd53b4201 mrs	x1, nzcv";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.nzcv();
+      sp = r.sp() + 32;
+      t.session().accumulate_ticks_processed(1);
+      t.ticks += 1;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 12;
+    }
+    // 12 0x52800028 mov	w8, #0x1
+    else if (instr == 0x52800028) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0x52800028 mov	w8, #0x1";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      t.session().accumulate_ticks_processed(1);
+      t.ticks += 1;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 11;
+    }
+    // 16 0x52809411 mov	w17, #0x4a0
+    else if (instr == 0x52809411) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0x52809411 mov	w17, #0x4a0";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      t.session().accumulate_ticks_processed(1);
+      t.ticks += 1;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 10;
+    }
+    // 20 0x72ae0031 movk	w17, #0x7001, lsl #16
+    else if (instr == 0x72ae0031) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0x72ae0031 movk	w17, #0x7001, lsl #16";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      t.session().accumulate_ticks_processed(1);
+      t.ticks += 1;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 9;
+    }
+    // 24 0xf8280230 ldadd	x8, x16, [x17]
+    else if (instr == 0xf8280230) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xf8280230 ldadd	x8, x16, [x17]";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      t.session().accumulate_ticks_processed(1);
+      t.ticks += 1;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 8;
+    }
+    // 28 0xa9404630 ldp	x16, x17, [x17]
+    else if (instr == 0xa9404630) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xa9404630 ldp	x16, x17, [x17]";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 7;
+    }
+    // 32 0xeb11021f cmp	x16, x17
+    else if (instr == 0xeb11021f) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xeb11021f cmp	x16, x17";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 6;
+    }
+    // 36 0x5400004b b.lt	#8
+    else if (instr == 0x5400004b) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0x5400004b b.lt	#8";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 5;
+    }
+    // 40 0xd4200000 brk	#0x0
+    else if (instr == 0xd4200000) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xd4200000 brk	#0x0";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 4;
+    }
+    // 44 0xd51b4201 msr	nzcv, x1
+    else if (instr == 0xd51b4201) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xd51b4201 msr	nzcv, x1";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.x(1) >> 28;
+      sp = r.sp() + 32;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 3;
+    }
+    // 48 0xa8c147f0 ldp	x16, x17, [sp], #16
+    else if (instr == 0xa8c147f0) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xa8c147f0 ldp	x16, x17, [sp], #16";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
+      x1 = t.read_mem(r.sp().cast<uint64_t>() + 2);
+      x17 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x16 = t.read_mem(r.sp().cast<uint64_t>());
+      nzcv = r.nzcv();
+      sp = r.sp() + 32;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 2;
+    }
+    // 52 0xa8c123e1 ldp	x1, x8, [sp], #16
+    else if (instr == 0xa8c123e1) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip()
+                 << " 0xa8c123e1 ldp	x1, x8, [sp], #16";
+      x8 = t.read_mem(r.sp().cast<uint64_t>() + 1);
+      x1 = t.read_mem(r.sp().cast<uint64_t>());
+      x17 = r.x(17);
+      x16 = r.x(16);
+      nzcv = r.nzcv();
+      sp = r.sp() + 16;
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 1;
+    }
+    // 56 b.cond / bc.cond / cbz / cbnz / tbz / tbnz
+    else if (is_conditional_branch_aarch64(instr)) {
+      LOG(debug) << "in dynamic software counter stub " << r.ip() << HEX(instr)
+                 << " b.cond/bc.cond/cbz/cbnz/tbz/tbnz";
+      x8 = r.x(8);
+      x1 = r.x(1);
+      x17 = r.x(17);
+      x16 = r.x(16);
+      nzcv = r.nzcv();
+      sp = r.sp();
+      ip_cond_br = r.ip().to_data_ptr<uint32_t>();
+    } else {
+      t.vm()->print_process_maps(&t);
+      FATAL()
+          << "unknown dynamic software counters stub instruction hex codes: "
+          << HEX(instr) << " at ip: " << t.ip() << " with mapping flags: "
+          << t.vm()->mapping_flags_of(t.ip().to_data_ptr<void>());
+      __builtin_unreachable();
+    }
+    r.set_nzcv(nzcv);
+    r.set_arg2(x1);
+    r.set_x(8, x8);
+    r.set_x(16, x16);
+    r.set_x(17, x17);
+    r.set_sp(sp);
+    auto next_ip = jump_ip_aarch64(t, ip_cond_br, r);
+    r.set_ip(next_ip);
+  }
+  t.set_regs(r);
+  return true;
+}
+
 bool Task::maybe_move_out_of_dynamic_software_counter_stub() {
   RR_ARCH_FUNCTION(maybe_move_out_of_dynamic_software_counter_stub_arch, arch(), *this);
 }
@@ -5007,6 +5422,102 @@ bool maybe_move_out_of_static_software_counter_critical_section_arch(Task& t) {
   ASSERT(&t, false) << "Architecture not supported. enum SupportedArch value: "
                     << t.arch();
   __builtin_unreachable();
+}
+
+template<>
+bool maybe_move_out_of_static_software_counter_critical_section_arch<ARM64Arch>(Task &t)
+{
+  auto x1 = t.regs().arg2();
+  if (x1 != 0xcdef89ab45670123) {
+    return false;
+  }
+  LOG(debug) << "Moving program out of software counter critical section, ip(): " << t.ip();
+  remote_ptr<uint32_t> addr = t.ip().to_data_ptr<uint32_t>();
+  auto instruction = t.read_mem(addr);
+  // f8280230      ldadd   x8, x16, [x17]
+  // a9404630      ldp     x16, x17, [x17]
+  // eb11021f      cmp     x16, x17
+  // 540000ab      b.lt    0x5a7fc <__do_software_count+0x4c>
+  // 52809710      mov     w16, #0x4b8             // =1208
+  // 72ae0030      movk    w16, #0x7001, lsl #16
+  // b828821f      swp     w8, wzr, [x16]
+  // d4200000      brk     #0
+  // 52800010      mov     w16, #0x0               // =0
+  // 52800011      mov     w17, #0x0               // =0
+  // d51b421f      msr     nzcv, xzr
+  // aa1f03e1      mov     x1, xzr
+  // ^^ end of critical section ^^
+
+  auto r = t.regs();
+  // f8280230      ldadd   x8, x16, [x17]
+  if (instruction == 0xf8280230) {
+    LOG(debug) << "Found a unexecuted ldadd software counter instruction at ip(): " << t.ip()
+               << "; will add 1 tick";
+    t.session().accumulate_ticks_processed(1);
+    t.ticks += 1;
+    r.set_ip(r.ip() + 48);
+  }
+  // a9404630      ldp     x16, x17, [x17]
+  else if (instruction == 0xa9404630) {
+    r.set_ip(r.ip() + 44);
+  }
+  // eb11021f      cmp     x16, x17
+  else if (instruction == 0xeb11021f) {
+    r.set_ip(r.ip() + 40);
+  }
+  // 540000ab      b.lt    0x5a7fc <__do_software_count+0x4c>
+  else if (instruction == 0x540000ab) {
+    r.set_ip(r.ip() + 36);
+  }
+  // 52809710      mov     w16, #0x4b8
+  else if (instruction == 0x52809710) {
+    r.set_ip(r.ip() + 32);
+  }
+  // 72ae0030      movk    w16, #0x7001, lsl #16
+  else if (instruction == 0x72ae0030) {
+    r.set_ip(r.ip() + 28);
+  }
+  // b828821f      swp     w8, wzr, [x16]
+  else if (instruction == 0xb828821f) {
+    r.set_ip(r.ip() + 24);
+  }
+  // d4200000      brk     #0
+  else if (instruction == 0xd4200000) {
+    LOG(debug) << "Found a `brk #0` software counter instruction at ip(): " << t.regs().ip()
+               << "; will skip it";
+    r.set_ip(r.ip() + 20);
+  }
+  // 52800010      mov     w16, #0x0
+  else if (instruction == 0x52800010) {
+    r.set_ip(r.ip() + 16);
+  }
+  // 52800011      mov     w17, #0x0
+  else if (instruction == 0x52800011) {
+    r.set_ip(r.ip() + 12);
+  }
+  // d51b421f      msr     nzcv, xzr
+  else if (instruction == 0xd51b421f) {
+    r.set_ip(r.ip() + 8);
+  }
+  // aa1f03e1      mov     x1, xzr
+  else if (instruction == 0xaa1f03e1) {
+    r.set_ip(r.ip() + 4);
+  } else {
+    // TODO: Another approach might be to return false here and assume that the
+    // register x1 acquired the sentinel value by coincidence.
+    ASSERT(&t,
+           false && "unknown software counters critical section instruction")
+        << "unknown software counters critical section instruction hex codes: "
+        << HEX(instruction);
+  }
+  r.set_x(16, 0);
+  r.set_x(17, 0);
+  // No longer in critical section as the ip() has been bumped forward
+  r.set_arg2(0);
+  // Clear nzcv
+  r.set_pstate(r.pstate() & 0x0fffffff);
+  t.set_regs(r);
+  return true;
 }
 
 template<>

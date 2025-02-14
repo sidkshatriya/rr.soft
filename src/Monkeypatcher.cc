@@ -465,6 +465,31 @@ static remote_ptr<uint8_t> allocate_extended_jump_aarch64(
   return jump_addr;
 }
 
+constexpr int64_t MAX_AARCH64_JUMP_DELTA = ((1 << 25) - 1) * 4;
+constexpr int64_t MIN_AARCH64_JUMP_DELTA = (1 << 25) * -4;
+const uint32_t SC_AARCH64_STUB[] = {
+0xa9bf23e1, 	// stp	x1, x8, [sp, #-16]!
+0xa9bf47f0, 	// stp	x16, x17, [sp, #-16]!
+0xd53b4201, 	// mrs	x1, nzcv
+0x52800028, 	// mov	w8, #0x1
+0x52809411, 	// mov	w17, #0x4a0
+0x72ae0031, 	// movk	w17, #0x7001, lsl #16
+0xf8280230, 	// ldadd	x8, x16, [x17]
+0xa9404630, 	// ldp	x16, x17, [x17]
+0xeb11021f, 	// cmp	x16, x17
+0x5400004b, 	// b.lt	jump_label (jump forward 8 bytes)
+0xd4200000, 	// brk	#0x0
+// jump_label:
+0xd51b4201, 	// msr	nzcv, x1
+0xa8c147f0, 	// ldp	x16, x17, [sp], #16
+0xa8c123e1, 	// ldp	x1, x8, [sp], #16
+0x00000000, 	// udf	#0
+0x14000000, 	// b	#0
+0x14000000, 	// b	#0
+};
+constexpr size_t SC_AARCH64_STUB_LEN = sizeof(SC_AARCH64_STUB)/sizeof(uint32_t);
+constexpr size_t SC_AARCH64_STUB_SIZE_BYTES = sizeof(SC_AARCH64_STUB);
+
 enum cond_branch_type {
   BTYPE_UNKNOWN,
   BCOND_BCCOND,
@@ -547,6 +572,44 @@ bool jump_doable_arch<X64Arch>(
   if (!(MIN_X64_JUMP_IMM <= from_stub_jump_back_to_orig_jump_target_instr_imm &&
         from_stub_jump_back_to_orig_jump_target_instr_imm <=
             MAX_X64_JUMP_IMM)) {
+    return false;
+  }
+
+  return true;
+}
+
+template <>
+bool jump_doable_arch<ARM64Arch>(
+    const uint64_t stub_landing_addr, const uint64_t cond_jump_from_addr,
+    int64_t cond_jump_delta, const uint64_t stub_area_end,
+    const size_t stub_size_bytes,
+    int64_t& from_stub_jump_back_to_next_instr_delta,
+    int64_t& from_stub_jump_back_to_original_jump_target_delta) {
+  uint64_t stub_end = stub_landing_addr + stub_size_bytes;
+  if (!(stub_end <= stub_area_end)) {
+    return false;
+  }
+
+  int64_t to_stub_jump_delta = stub_landing_addr - cond_jump_from_addr;
+  if (!(MIN_AARCH64_JUMP_DELTA <= to_stub_jump_delta &&
+        to_stub_jump_delta <= MAX_AARCH64_JUMP_DELTA)) {
+    return false;
+  }
+
+  from_stub_jump_back_to_next_instr_delta =
+      (cond_jump_from_addr + 4) - (stub_landing_addr + stub_size_bytes - 8);
+  if (!(MIN_AARCH64_JUMP_DELTA <= from_stub_jump_back_to_next_instr_delta &&
+        from_stub_jump_back_to_next_instr_delta <= MAX_AARCH64_JUMP_DELTA)) {
+    return false;
+  }
+
+  from_stub_jump_back_to_original_jump_target_delta =
+      (cond_jump_from_addr + cond_jump_delta) -
+      (stub_landing_addr + stub_size_bytes - 4);
+  if (!(MIN_AARCH64_JUMP_DELTA <=
+            from_stub_jump_back_to_original_jump_target_delta &&
+        from_stub_jump_back_to_original_jump_target_delta <=
+            MAX_AARCH64_JUMP_DELTA)) {
     return false;
   }
 
@@ -671,6 +734,109 @@ static Monkeypatcher::JumpStubArea* get_or_create_in_range_stub_area(
       stub_size_bytes;
   t.session().accumulate_sc_jump_areas_stub_capacity(additional_capacity);
   return found_stub_area;
+}
+
+static remote_ptr<uint32_t> allocate_software_counter_stub_aarch64(
+    RecordTask& t, vector<Monkeypatcher::JumpStubArea>& stub_areas,
+    size_t& last_used_stub_area, const uint32_t cond_instr,
+    const remote_ptr<uint32_t> cond_jump_from_addr,
+    std::vector<uint32_t>& inst_buff) {
+  int64_t cond_jump_delta;
+  auto cond_type = BTYPE_UNKNOWN;
+  if (cond_instr >> 24 == 0x54) {
+    cond_type = BCOND_BCCOND;
+    // LOG(debug) << "Found b.cond/bc.cond instruction: " << HEX(cond_instr)
+    //            << " at: " << cond_instr_addr;
+    cond_jump_delta = (cond_instr >> 5) & 0x7'FFFF;
+    // sign extend
+    if (cond_jump_delta & (1 << 18)) {
+      cond_jump_delta = (cond_jump_delta | 0xFFFF'FFFF'FFF8'0000UL) << 2;
+    } else {
+      cond_jump_delta <<= 2;
+    }
+  } else if (((cond_instr >> 24) & 0b0111'1110) == 0b0011'0100) {
+    cond_type = CBZ_CBNZ;
+    // LOG(debug) << "Found cbz/cbnz instruction: " << HEX(cond_instr)
+    //            << " at: " << cond_instr_addr;
+    cond_jump_delta = (cond_instr >> 5) & 0x7FFFF;
+    // sign extend
+    if (cond_jump_delta & (1 << 18)) {
+      cond_jump_delta = (cond_jump_delta | 0xFFFF'FFFF'FFF8'0000UL) << 2;
+    } else {
+      cond_jump_delta <<= 2;
+    }
+  } else if (((cond_instr >> 24) & 0b0111'1110) == 0b0011'0110) {
+    cond_type = TBZ_TBNZ;
+    // LOG(debug) << "Found tbz/tbnz instruction: " << HEX(cond_instr)
+    //            << " at: " << cond_instr_addr;
+    cond_jump_delta = (cond_instr >> 5) & 0x3FFF;
+    // sign extend
+    if (cond_jump_delta & (1 << 13)) {
+      cond_jump_delta = (cond_jump_delta | 0xFFFF'FFFF'FFFF'C000UL) << 2;
+    } else {
+      cond_jump_delta <<= 2;
+    }
+  } else {
+    ASSERT(
+        &t,
+        false &&
+            "Only b.cond, bc.cond, cbz, cbnz, tbz, tbnz supported on aarch64");
+    __builtin_unreachable();
+  }
+
+  int64_t from_stub_jump_back_to_next_instr_delta = 0;
+  int64_t from_stub_jump_back_to_original_jump_target_delta = 0;
+  Monkeypatcher::JumpStubArea* found_stub_area =
+      get_or_create_in_range_stub_area(
+          t, stub_areas, last_used_stub_area,
+          cond_jump_from_addr.cast<uint8_t>(), cond_jump_delta,
+          from_stub_jump_back_to_next_instr_delta,
+          from_stub_jump_back_to_original_jump_target_delta,
+          SC_AARCH64_STUB_SIZE_BYTES);
+
+  if (!found_stub_area) {
+    return nullptr;
+  }
+
+  // Need to fill in first three instruction
+  const uint32_t offset_imm26 =
+      (from_stub_jump_back_to_original_jump_target_delta >> 2) & 0x03ff'ffff;
+  // 0x14000000 is b #0
+  inst_buff[SC_AARCH64_STUB_LEN - 1] = 0x14000000 | offset_imm26;
+
+  const uint32_t offset_imm26_2 =
+      (from_stub_jump_back_to_next_instr_delta >> 2) & 0x03ff'ffff;
+  // 0x14000000 is b #0
+  inst_buff[SC_AARCH64_STUB_LEN - 2] = 0x14000000 | offset_imm26_2;
+
+  // b.cond and bc.cond
+  if (cond_type == BCOND_BCCOND) {
+    uint32_t consistent_bit_and_cond_code = cond_instr & 0x1f;
+    // represents a jump forward of 8 bytes
+    uint32_t imm19 = (0x8 >> 2) << 5;
+    inst_buff[SC_AARCH64_STUB_LEN - 3] =
+        0x54000000 | imm19 | consistent_bit_and_cond_code;
+  } else if (cond_type == CBZ_CBNZ) {
+    // represents a jump forward of 8 bytes
+    uint32_t imm19 = (0x8 >> 2) << 5;
+    // zero out immediate and then add in the imm19 branch offset
+    inst_buff[SC_AARCH64_STUB_LEN - 3] = (cond_instr & 0xFF00001F) | imm19;
+  } else if (cond_type == TBZ_TBNZ) {
+    // represents a jump forward of 8 bytes
+    uint32_t imm14 = (0x8 >> 2) << 5;
+    // zero out immediate and then add in the imm14 branch offset
+    inst_buff[SC_AARCH64_STUB_LEN - 3] = (cond_instr & 0xFFF8001F) | imm14;
+  } else {
+    // Only support b.cond, bc.cond, cbz, cbnz, tbz, tbnz right now
+    ASSERT(&t, false);
+  }
+
+  const auto jump_addr =
+      found_stub_area->jump_area_start + found_stub_area->allocated_bytes;
+  found_stub_area->allocated_bytes += SC_AARCH64_STUB_SIZE_BYTES;
+
+  t.session().accumulate_sc_jump_stubs_allocated();
+  return jump_addr.cast<uint32_t>();
 }
 
 static remote_ptr<uint8_t> allocate_software_counter_stub_x64(
@@ -2049,6 +2215,74 @@ static void instrument_with_software_counters_arch(
   ASSERT(&t, false) << "Architecture not supported. enum SupportedArch value: "
                     << t.arch();
   __builtin_unreachable();
+}
+
+template <>
+void instrument_with_software_counters_arch<ARM64Arch>(
+    Monkeypatcher& patcher, RecordTask& t, const remote_ptr<void> addr_start,
+    const remote_ptr<void> addr_end, const KernelMapping& map,
+    rocksdb::DB& db) {
+  ASSERT(&t, map.start() >= addr_start);
+  ASSERT(&t, addr_end <= map.end());
+  const remote_ptr<uint32_t> instrumentation_addr_start =
+      addr_start.cast<uint32_t>();
+  const remote_ptr<uint32_t> instrumentation_addr_end =
+      addr_end.cast<uint32_t>();
+
+  vector<uint32_t> inst_buff;
+  inst_buff.resize(SC_AARCH64_STUB_LEN);
+  memcpy(inst_buff.data(), SC_AARCH64_STUB, SC_AARCH64_STUB_SIZE_BYTES);
+
+  const size_t map_file_offset_bytes = map.file_offset_bytes();
+  const auto map_start = map.start();
+  const size_t min_file_offset = map_file_offset_bytes +
+                                 instrumentation_addr_start.as_int() -
+                                 map_start.as_int();
+  const size_t max_file_offset = map_file_offset_bytes +
+                                 instrumentation_addr_end.as_int() -
+                                 map_start.as_int();
+  ASSERT(&t, min_file_offset < max_file_offset);
+
+  const auto upper_bound = rocksdb::Slice(
+      reinterpret_cast<const char*>(&max_file_offset), sizeof(uint64_t));
+  const auto lower_bound = rocksdb::Slice(
+      reinterpret_cast<const char*>(&min_file_offset), sizeof(uint64_t));
+  rocksdb::ReadOptions options;
+  options.iterate_upper_bound = &upper_bound;
+  auto it = unique_ptr<rocksdb::Iterator>(db.NewIterator(options));
+  it->Seek(lower_bound);
+
+  size_t patched = 0;
+  while (it->Valid()) {
+    const uint64_t file_offset =
+        *reinterpret_cast<const uint64_t*>(it->key().data());
+    remote_ptr<uint32_t> instrumentation_addr =
+        (map_start + file_offset - map_file_offset_bytes).cast<uint32_t>();
+    const uint32_t instr = t.read_mem(instrumentation_addr);
+    if (is_conditional_branch_aarch64(instr)) {
+      const remote_ptr<uint32_t> jump_stub_start =
+          allocate_software_counter_stub_aarch64(
+              t, patcher.software_counter_stub_areas,
+              patcher.last_used_software_counter_stub_area, instr,
+              instrumentation_addr, inst_buff);
+      if (jump_stub_start) {
+        const int64_t jump_delta =
+            int64_t(jump_stub_start.as_int() - instrumentation_addr.as_int());
+        ASSERT(&t, MIN_AARCH64_JUMP_DELTA <= jump_delta &&
+                       jump_delta <= MAX_AARCH64_JUMP_DELTA);
+        const uint32_t imm26 = 0x3FF'FFFF & (jump_delta >> 2);
+        const uint32_t new_instr = 0x14000000 | imm26;
+        write_and_record_mem(&t, instrumentation_addr, &new_instr, 1);
+        write_and_record_mem(&t, jump_stub_start, inst_buff.data(),
+                             inst_buff.size());
+        patched++;
+      }
+    }
+    it->Next();
+  }
+  LOG(debug) << "Patched: " << patched << " conditional branches in "
+             << map.fsname() << " from: " << instrumentation_addr_start
+             << " to: " << instrumentation_addr_end;
 }
 
 template <>

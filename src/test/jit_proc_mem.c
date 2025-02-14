@@ -16,25 +16,25 @@ typedef int (*puts_func)(const char* fmt);
 // want it.
 
 #if defined(__i386__)
-extern char template_function;
-extern char template_function2;
+extern char template_function__no_soft_cnt;
+extern char template_function2__no_soft_cnt;
 // Some versions of GCC are bad at emitting calls to absolute arguments and
 // still try to call __x86.get_pc_thunk.ax which won't work if we just copy
 // it from the C version of the template function. Just hardcode it here.
-asm("template_function:\n\t"
+asm("template_function__no_soft_cnt:\n\t"
     "push 4(%esp)\n\t"
     "call *12(%esp)\n\t"
     "add $4,%esp\n\t"
     "xor %eax,%eax\n\t"
     "ret\n\t"
-    "template_function2:\n");
+    "template_function2__no_soft_cnt:\n");
 #else
-static int __attribute__ ((section(".text.template"))) template_function(char* text, puts_func f) {
+static int __attribute__ ((section(".text.template"))) template_function__no_soft_cnt(char* text, puts_func f) {
   f(text);
   return 0;
 }
 
-static int __attribute__ ((section(".text.template"))) template_function2(char* text, puts_func f) {
+static int __attribute__ ((section(".text.template"))) template_function2__no_soft_cnt(char* text, puts_func f) {
   f(text);
   return 0;
 }
@@ -51,8 +51,8 @@ int main(void) {
   int memfd = open("/proc/self/mem", O_RDWR);
   breakpoint();
 
-  char *first = (char*)&template_function;
-  char *second = (char*)&template_function2;
+  char *first = (char*)&template_function__no_soft_cnt;
+  char *second = (char*)&template_function2__no_soft_cnt;
 
   if (first > second) {
     char *tmp = second;

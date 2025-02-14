@@ -59,12 +59,27 @@ template <> void return_addresses_arch<X64Arch>(ReturnAddressList* result, Task*
   return_addresses_x86ish<X64Arch>(result, t);
 }
 
-template <> void return_addresses_arch<ARM64Arch>(ReturnAddressList* result, Task*) {
-  // On aarch64, we track all taken branches, so tracking return addresses should
-  // not be necessary.
-  DEBUG_ASSERT(ReturnAddressList::AARCH64_COUNT == 0);
-  for (size_t i = 0; i < array_length(result->addresses); ++i) {
-    result->addresses[i] = nullptr;
+template <>
+void return_addresses_arch<ARM64Arch>(ReturnAddressList* result, Task* t) {
+  // On aarch64, we track all taken branches (except when using software
+  // counters), so tracking return addresses should not be necessary.
+  if (!t->hpc.is_software_counter()) {
+    for (size_t i = 0; i < array_length(result->addresses); ++i) {
+      result->addresses[i] = nullptr;
+    }
+    return;
+  }
+  typename ARM64Arch::size_t frame[2];
+  result->addresses[0] = t->regs().x(30);
+  int next_address = 1;
+
+  remote_ptr<void> fp = t->regs().x(29);
+  for (int i = next_address; i < ReturnAddressList::AARCH64_SOFT_COUNT; ++i) {
+    if (!read_bytes_no_breakpoints(t, fp, sizeof(frame), frame)) {
+      break;
+    }
+    result->addresses[i] = frame[1];
+    fp = frame[0];
   }
 }
 

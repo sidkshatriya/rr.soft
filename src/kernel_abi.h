@@ -2626,6 +2626,11 @@ struct ARM64Arch : public GenericArch<SupportedArch::aarch64, WordSize64Defs> {
   };
   RR_VERIFY_TYPE_ARCH(SupportedArch::aarch64, struct ::ethtool_rxnfc, struct ethtool_rxnfc);
 
+  struct user_pac_mask {
+    uint64_t data_mask;
+    uint64_t insn_mask;
+  };
+
   struct user_pac_address_keys {
     __uint128_t apiakey;
     __uint128_t apibkey;

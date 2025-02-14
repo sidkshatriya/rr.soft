@@ -2984,6 +2984,58 @@ static size_t db_write_arch(const RecordTask& t, const string&, const string&,
   __builtin_unreachable();
 }
 
+template <>
+size_t db_write_arch<ARM64Arch>(
+    const RecordTask& t, const string& unique_id, const string& fsname,
+    ElfFileReader& reader, const SymbolTable& syms, rocksdb::DB& db,
+    const rocksdb::WriteOptions default_write_options) {
+  rocksdb::Status status;
+  const size_t len = syms.size();
+  size_t insns_found = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (!syms.symbol_size(i) || syms.symbol_type(i) != STT_FUNC) {
+      continue;
+    }
+    // Batch writes to hopefully speed things up
+    rocksdb::WriteBatch batch;
+    bool abandon_batch = false;
+
+    uint64_t start_addr = syms.addr(i);
+    uint64_t end_addr = syms.addr(i) + syms.symbol_size(i);
+    for (uint64_t elf_addr = start_addr; elf_addr < end_addr;
+         elf_addr += sizeof(uint32_t)) {
+      uintptr_t file_offset = 0;
+      if (!reader.addr_to_offset(elf_addr, file_offset)) {
+        LOG(warn) << "ELF address " << HEX(elf_addr) << " not in file";
+        continue;
+      }
+      uint32_t insn = 0;
+      ASSERT(&t, reader.read_into(file_offset, &insn))
+          << "could not read instruction from elf file";
+      if (is_conditional_branch_aarch64(insn)) {
+        insns_found++;
+        status = batch.Put(
+            rocksdb::Slice((const char*)&file_offset, sizeof(uint64_t)),
+            rocksdb::Slice((const char*)&elf_addr, sizeof(uint64_t)));
+        ASSERT(&t, status.ok()) << "could not Put batch";
+      } else if (is_exclusive_load_aarch64(insn)) {
+        abandon_batch = true;
+        break;
+      }
+    }
+    if (!abandon_batch) {
+      status = db.Write(default_write_options, &batch);
+      ASSERT(&t, status.ok()) << "could not Write to db";
+    }
+  }
+
+  LOG(info) << "found: " << insns_found
+            << " conditional branch instructions in: " << fsname
+            << " with unique id: " << unique_id;
+
+  return insns_found;
+}
+
 #ifdef __x86_64__
 template <>
 size_t db_write_arch<X64Arch>(
