@@ -48,7 +48,7 @@ public:
     return start_ <= o_start_ && o_end_ <= end_;
   }
 
-  bool intersects(const MemoryRange& other) const {
+  inline bool intersects(const MemoryRange& other) const {
     remote_ptr<void> s = std::max(start_, other.start_);
     remote_ptr<void> e = std::min(end_, other.end_);
     return s < e;
