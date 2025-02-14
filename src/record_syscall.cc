@@ -6944,7 +6944,7 @@ static void rec_process_syscall_arch(RecordTask* t,
       } else {
         int fd = r.syscall_result_signed();
 
-        int flags;
+        int flags = 0;
         switch (syscallno) {
         case Arch::open:
           flags = r.arg2();
