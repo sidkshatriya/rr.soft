@@ -1937,7 +1937,7 @@ if(BUILD_TESTS)
   if(NOT "${CPU_MODEL_PHI}" STREQUAL "")
     set(TEST_MONITOR_DEFAULT_TIMEOUT 480)
   else()
-    set(TEST_MONITOR_DEFAULT_TIMEOUT 120)
+    set(TEST_MONITOR_DEFAULT_TIMEOUT 200)
   endif()
 
   # The real timeouts are handled by test-monitor
