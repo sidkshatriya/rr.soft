@@ -7,6 +7,8 @@
 
 #include <sstream>
 
+#include <rocksdb/iterator.h>
+
 #include "AddressSpace.h"
 #include "AutoRemoteSyscalls.h"
 #include "ElfReader.h"
@@ -19,6 +21,11 @@
 #include "kernel_abi.h"
 #include "kernel_metadata.h"
 #include "log.h"
+#include "preload/preload_interface.h"
+#include "remote_code_ptr.h"
+#include "rr/rr.h"
+#include <elf.h>
+#include <sys/mman.h>
 
 using namespace std;
 
@@ -456,6 +463,321 @@ static remote_ptr<uint8_t> allocate_extended_jump_aarch64(
   page->allocated += total_patch_size;
 
   return jump_addr;
+}
+
+enum cond_branch_type {
+  BTYPE_UNKNOWN,
+  BCOND_BCCOND,
+  CBZ_CBNZ,
+  TBZ_TBNZ,
+};
+
+constexpr int64_t MAX_X64_JUMP_IMM = INT32_MAX;
+constexpr int64_t MIN_X64_JUMP_IMM = INT32_MIN;
+// SC prefix means "Software Counter"
+const uint8_t SC_X64_PRELUDE[] = {
+  0x48, 0x89, 0x24, 0x25, 0xd8, 0x10, 0x00,
+  0x70, // mov    QWORD PTR ds:0x700010d8,rsp
+  0x48, 0xc7, 0xc4, 0xd8, 0x10, 0x00, 0x70, // mov    rsp,0x700010d8
+  0x9c,                                     // pushf
+  0x41, 0x53,                               // push   r11
+  0xf0, 0x48, 0xff, 0x04, 0x25, 0x90, 0x10, 0x00,
+  0x70, // lock inc QWORD PTR ds:0x70001090
+  0x4c, 0x8b, 0x1c, 0x25, 0x90, 0x10, 0x00,
+  0x70, // mov    r11,QWORD PTR ds:0x70001090
+  0x4c, 0x3b, 0x1c, 0x25, 0x98, 0x10, 0x00,
+  0x70,       // cmp    r11,QWORD PTR ds:0x70001098
+  0x7c, 0x01, // jl short <<JUMP_LABEL>>
+  0xcc,       // int3
+  // <<JUMP_LABEL>>:
+  0x45, 0x31, 0xdb, // xor    r11d,r11d
+  0x41, 0x5b,       // pop    r11
+  0x9d,             // popf
+  0x48, 0x8b, 0x24, 0x25, 0xd8, 0x10, 0x00,
+  0x70, // mov    rsp,QWORD PTR ds:0x700010d8
+};
+constexpr size_t SC_X64_PRELUDE_SIZE_BYTES = sizeof(SC_X64_PRELUDE);
+
+// How many bytes into the mapped space do the normal stubs start ?
+const size_t SC_MMAP_FIRST_STUB_START_OFFSET = 0;
+
+template <typename Arch>
+static bool jump_doable_arch(const uint64_t, const uint64_t, int64_t,
+                             const uint64_t, const size_t, int64_t&, int64_t&) {
+  assert(false && "Not implemented for platform");
+  __builtin_unreachable();
+}
+
+template <>
+// in x86 the jump "from" address is relative to the start of the next
+// instruction
+bool jump_doable_arch<X64Arch>(
+    const uint64_t stub_landing_addr, const uint64_t cond_jump_from_addr,
+    // important the delta is 64 bits
+    const int64_t cond_jump_actual_delta, const uint64_t stub_area_end,
+    const size_t stub_size_bytes,
+    int64_t& from_stub_jump_back_to_next_instr_imm,
+    int64_t& from_stub_jump_back_to_orig_jump_target_instr_imm) {
+  uint64_t stub_end = stub_landing_addr + stub_size_bytes;
+  if (!(stub_end <= stub_area_end)) {
+    return false;
+  }
+
+  // +5 and not +6 because the conditional jump will be replaced by
+  // an unconditional jump + nop
+  int64_t to_stub_jump_imm = stub_landing_addr - (cond_jump_from_addr + 5);
+  if (!(MIN_X64_JUMP_IMM <= to_stub_jump_imm &&
+        to_stub_jump_imm <= MAX_X64_JUMP_IMM)) {
+    return false;
+  }
+
+  // 5 byte relative unconditional jump that is just behind another 5 byte
+  // relative jump
+  from_stub_jump_back_to_next_instr_imm =
+      (cond_jump_from_addr + 6) - (stub_landing_addr + stub_size_bytes - 5);
+  if (!(MIN_X64_JUMP_IMM <= from_stub_jump_back_to_next_instr_imm &&
+        from_stub_jump_back_to_next_instr_imm <= MAX_X64_JUMP_IMM)) {
+    return false;
+  }
+
+  // 5 byte relative jump that is the last instruction
+  from_stub_jump_back_to_orig_jump_target_instr_imm =
+      (cond_jump_from_addr + cond_jump_actual_delta) -
+      (stub_landing_addr + stub_size_bytes);
+  if (!(MIN_X64_JUMP_IMM <= from_stub_jump_back_to_orig_jump_target_instr_imm &&
+        from_stub_jump_back_to_orig_jump_target_instr_imm <=
+            MAX_X64_JUMP_IMM)) {
+    return false;
+  }
+
+  return true;
+}
+
+static void could_not_find_nearby_mem_for_stub_area(
+    RecordTask& t, remote_ptr<void> map_addr) {
+  LOG(warn) << "  Can't find space close enough for software counter "
+               "jump stub before/after: "
+            << map_addr << " for tid: " << t.tid;
+  t.session().accumulate_no_near_stub_mem();
+}
+
+static bool jump_doable(
+    const SupportedArch arch, const uint64_t stub_landing_addr,
+    const uint64_t cond_jump_from_addr, int64_t cond_jump_delta,
+    const uint64_t stub_area_end, const size_t stub_size_bytes,
+    int64_t& from_stub_jump_back_to_next_instr_imm,
+    int64_t& from_stub_jump_back_to_orig_jump_target_instr_imm) {
+  RR_ARCH_FUNCTION(jump_doable_arch, arch, stub_landing_addr,
+                   cond_jump_from_addr, cond_jump_delta, stub_area_end,
+                   stub_size_bytes, from_stub_jump_back_to_next_instr_imm,
+                   from_stub_jump_back_to_orig_jump_target_instr_imm);
+}
+
+// Get a stub area from existing pool of stub areas or creates a new stub area
+// if the old areas are full or out of range.
+//
+// Returns nullptr if that could not be accomplished
+static Monkeypatcher::JumpStubArea* get_or_create_in_range_stub_area(
+    RecordTask& t, vector<Monkeypatcher::JumpStubArea>& stub_areas,
+    size_t& last_used_stub_area, const remote_ptr<uint8_t> cond_jump_from_addr,
+    const int64_t cond_jump_actual_delta,
+    int64_t& from_stub_jump_back_to_next_instr_imm,
+    int64_t& from_stub_jump_back_to_orig_jump_target_instr_imm,
+    const size_t stub_size_bytes) {
+  const size_t len = stub_areas.size();
+  Monkeypatcher::JumpStubArea* found_stub_area = nullptr;
+  SupportedArch arch = t.arch();
+
+  // To speed things up, try the last used stub area
+  // It is likely to be the same
+  if (last_used_stub_area < len) {
+    auto& area = stub_areas[last_used_stub_area];
+    const uint64_t stub_landing_addr =
+        area.jump_area_start.as_int() + area.allocated_bytes;
+    const uint64_t stub_area_end =
+        area.jump_area_start.as_int() + area.jump_area_size;
+    if (jump_doable(arch, stub_landing_addr, cond_jump_from_addr.as_int(),
+                    cond_jump_actual_delta, stub_area_end, stub_size_bytes,
+                    from_stub_jump_back_to_next_instr_imm,
+                    from_stub_jump_back_to_orig_jump_target_instr_imm)) {
+      found_stub_area = &area;
+      return found_stub_area;
+    }
+  }
+
+  for (size_t i = 0; i < len; i++) {
+    auto& area = stub_areas[i];
+    const uint64_t stub_landing_addr =
+        area.jump_area_start.as_int() + area.allocated_bytes;
+    const uint64_t stub_area_end =
+        area.jump_area_start.as_int() + area.jump_area_size;
+    if (jump_doable(arch, stub_landing_addr, cond_jump_from_addr.as_int(),
+                    cond_jump_actual_delta, stub_area_end, stub_size_bytes,
+                    from_stub_jump_back_to_next_instr_imm,
+                    from_stub_jump_back_to_orig_jump_target_instr_imm)) {
+      found_stub_area = &area;
+      last_used_stub_area = i;
+      return found_stub_area;
+    }
+  }
+
+  // If page size = 4K then 32 pages
+  // If page size = 16K then 8 pages
+  // If page size = 64K then 2 pages
+  // ... and 2 guard pages on either side
+  const uint32_t num_stub_pages = SC_MMAP_AREA / page_size();
+  const uint32_t required_space = (2 + num_stub_pages) * page_size();
+  const uint32_t non_guard_space = required_space - 2 * page_size();
+  const auto map_addr = t.vm()->mapping_of(cond_jump_from_addr).map.start();
+
+  // Find free space before the patch site.
+  const remote_ptr<void> free_mem_before =
+      t.vm()->find_free_memory_before(&t, required_space, map_addr);
+
+  remote_ptr<uint8_t> map_start;
+  if (free_mem_before) {
+    // skip the initial page, its a guard
+    map_start = (free_mem_before + page_size()).cast<uint8_t>();
+    const uint64_t stub_landing_addr =
+        map_start.as_int() + SC_MMAP_FIRST_STUB_START_OFFSET;
+    const uint64_t stub_area_end = map_start.as_int() + non_guard_space;
+    if (!jump_doable(arch, stub_landing_addr, cond_jump_from_addr.as_int(),
+                     cond_jump_actual_delta, stub_area_end, stub_size_bytes,
+                     from_stub_jump_back_to_next_instr_imm,
+                     from_stub_jump_back_to_orig_jump_target_instr_imm)) {
+      // Find free space after the patch site.
+      const remote_ptr<void> free_mem_after =
+          t.vm()->find_free_memory(&t, required_space, map_addr);
+      if (free_mem_after) {
+        // skip the initial page, its a guard
+        map_start = (free_mem_after + page_size()).cast<uint8_t>();
+        const uint64_t stub_landing_addr =
+            map_start.as_int() + SC_MMAP_FIRST_STUB_START_OFFSET;
+        const uint64_t stub_area_end = map_start.as_int() + non_guard_space;
+        if (!jump_doable(arch, stub_landing_addr, cond_jump_from_addr.as_int(),
+                         cond_jump_actual_delta, stub_area_end, stub_size_bytes,
+                         from_stub_jump_back_to_next_instr_imm,
+                         from_stub_jump_back_to_orig_jump_target_instr_imm)) {
+          could_not_find_nearby_mem_for_stub_area(t, map_addr);
+          return nullptr;
+        }
+      } else {
+        could_not_find_nearby_mem_for_stub_area(t, map_addr);
+        return nullptr;
+      }
+    }
+  } else {
+    // Find free space after the patch site.
+    const remote_ptr<void> free_mem_after =
+        t.vm()->find_free_memory(&t, required_space, map_addr);
+    if (free_mem_after) {
+      // skip the initial page, its a guard
+      map_start = (free_mem_after + page_size()).cast<uint8_t>();
+      const uint64_t stub_landing_addr =
+          map_start.as_int() + SC_MMAP_FIRST_STUB_START_OFFSET;
+      const uint64_t stub_area_end = map_start.as_int() + non_guard_space;
+      if (!jump_doable(arch, stub_landing_addr, cond_jump_from_addr.as_int(),
+                       cond_jump_actual_delta, stub_area_end, stub_size_bytes,
+                       from_stub_jump_back_to_next_instr_imm,
+                       from_stub_jump_back_to_orig_jump_target_instr_imm)) {
+        could_not_find_nearby_mem_for_stub_area(t, map_addr);
+        return nullptr;
+      }
+    } else {
+      could_not_find_nearby_mem_for_stub_area(t, map_addr);
+      return nullptr;
+    }
+  }
+
+  const bool ret = t.vm()->map_software_counter_jump_stub_area(t, map_start,
+                                                               non_guard_space);
+  if (!ret) {
+    FATAL() << "Could not map software counter jump stub area at:" << map_start;
+    return nullptr;
+  }
+
+  stub_areas.push_back(
+      Monkeypatcher::JumpStubArea(map_start, num_stub_pages * page_size()));
+  found_stub_area = &stub_areas.back();
+  found_stub_area->allocated_bytes = SC_MMAP_FIRST_STUB_START_OFFSET;
+
+  // statistics
+  t.session().accumulate_sc_jump_areas_mmaped();
+  const size_t additional_capacity =
+      (found_stub_area->jump_area_size - found_stub_area->allocated_bytes) /
+      stub_size_bytes;
+  t.session().accumulate_sc_jump_areas_stub_capacity(additional_capacity);
+  return found_stub_area;
+}
+
+static remote_ptr<uint8_t> allocate_software_counter_stub_x64(
+    RecordTask& t, vector<Monkeypatcher::JumpStubArea>& stub_areas,
+    size_t& last_used_stub_area, const remote_ptr<uint8_t> cond_jump_from_addr,
+    const PatchData& patch_data, vector<uint8_t>& stub_buff,
+    vector<uint8_t>& instr_patch) {
+  const int64_t cond_jump_actual_delta = patch_data.actual_delta;
+  constexpr size_t stub_size_bytes =
+      SC_X64_PRELUDE_SIZE_BYTES /* counting prelude */ + 6 /* conditional jump */
+      + 5 /* unconditional branch */ + 5 /* another unconditional branch */;
+
+  int64_t from_stub_jump_back_to_next_instr_imm = 0;
+  int64_t from_stub_jump_back_to_orig_jump_target_instr_imm = 0;
+  Monkeypatcher::JumpStubArea* found_stub_area =
+      get_or_create_in_range_stub_area(
+          t, stub_areas, last_used_stub_area, cond_jump_from_addr,
+          cond_jump_actual_delta, from_stub_jump_back_to_next_instr_imm,
+          from_stub_jump_back_to_orig_jump_target_instr_imm, stub_size_bytes);
+  const int32_t from_stub_jump_back_to_next_instr_imm32 =
+      from_stub_jump_back_to_next_instr_imm;
+  const int32_t from_stub_jump_back_to_orig_jump_target_instr_imm32 =
+      from_stub_jump_back_to_orig_jump_target_instr_imm;
+
+  if (!found_stub_area) {
+    return nullptr;
+  }
+
+  {
+    // counting prelude
+    stub_buff.resize(SC_X64_PRELUDE_SIZE_BYTES);
+
+    // conditional branch instruction, jump forward 5 bytes
+    stub_buff.push_back(patch_data.data[0]); // opcode byte 1
+    stub_buff.push_back(patch_data.data[1]); // opcode byte 2
+    const int32_t five = 5;
+    const auto* p_five = &five;
+    stub_buff.insert(stub_buff.end(), (char*)p_five, (char*)(p_five + 1));
+
+    // jmp to next instruction in original instruction stream
+    stub_buff.push_back(0xe9); // jmp rel32
+    const auto p_next = &from_stub_jump_back_to_next_instr_imm32;
+    stub_buff.insert(stub_buff.end(), (char*)p_next, (char*)(p_next + 1));
+
+    // jmp to successful jump target in original instruction stream
+    stub_buff.push_back(0xe9); // jmp rel32
+    const auto p_target = &from_stub_jump_back_to_orig_jump_target_instr_imm32;
+    stub_buff.insert(stub_buff.end(), (char*)p_target, (char*)(p_target + 1));
+    ASSERT(&t, stub_buff.size() == stub_size_bytes)
+        << stub_buff.size() << " != " << stub_size_bytes;
+  }
+  const auto stub_landing_addr =
+      found_stub_area->jump_area_start + found_stub_area->allocated_bytes;
+  {
+    instr_patch.clear();
+    instr_patch.push_back(0xe9); // jmp rel32
+    // +5 and not +6 because this was originally a conditional jump
+    // but now it is an unconditional jump + nop
+    const int32_t delta_to_stub_landing_imm =
+        stub_landing_addr.as_int() - (cond_jump_from_addr.as_int() + 5);
+    const auto p_next = &delta_to_stub_landing_imm;
+    instr_patch.insert(instr_patch.end(), (char*)p_next, (char*)(p_next + 1));
+    instr_patch.push_back(0x90); // nop
+    ASSERT(&t, instr_patch.size() == 6);
+  }
+
+  found_stub_area->allocated_bytes += stub_buff.size();
+
+  t.session().accumulate_sc_jump_stubs_allocated();
+  return stub_landing_addr;
 }
 
 bool Monkeypatcher::is_jump_stub_instruction(remote_code_ptr ip, bool include_safearea) {
@@ -1412,6 +1734,9 @@ void patch_after_exec_arch<X64Arch>(RecordTask* t, Monkeypatcher& patcher) {
     patcher.patch_after_mmap(t, km.start(), km.size(),
                              km.file_offset_bytes(), -1,
                              Monkeypatcher::MMAP_EXEC);
+    patcher.software_counter_instrument_after_mmap(*t, km.start(), km.size(),
+                             km.file_offset_bytes(), -1,
+                             Monkeypatcher::MMAP_EXEC);
   }
 
   if (!t->vm()->has_vdso()) {
@@ -1430,6 +1755,9 @@ void patch_after_exec_arch<ARM64Arch>(RecordTask* t, Monkeypatcher& patcher) {
   for (const auto& m : t->vm()->maps()) {
     auto& km = m.map;
     patcher.patch_after_mmap(t, km.start(), km.size(),
+                             km.file_offset_bytes(), -1,
+                             Monkeypatcher::MMAP_EXEC);
+    patcher.software_counter_instrument_after_mmap(*t, km.start(), km.size(),
                              km.file_offset_bytes(), -1,
                              Monkeypatcher::MMAP_EXEC);
   }
@@ -1499,14 +1827,14 @@ static remote_ptr<void> resolve_address(ElfReader& reader, uintptr_t elf_addr,
   return map_start + uintptr_t(file_offset - map_offset);
 }
 
-static void set_and_record_bytes(RecordTask* t, ElfReader& reader,
+static remote_ptr<void> set_and_record_bytes(RecordTask* t, ElfReader& reader,
                                  uintptr_t elf_addr, const void* bytes,
                                  size_t size, remote_ptr<void> map_start,
                                  size_t map_size, size_t map_offset) {
   remote_ptr<void> addr =
     resolve_address(reader, elf_addr, map_start, map_size, map_offset);
   if (!addr) {
-    return;
+    return remote_ptr<void>();
   }
   bool ok = true;
   t->write_bytes_helper(addr, size, bytes, &ok);
@@ -1515,6 +1843,7 @@ static void set_and_record_bytes(RecordTask* t, ElfReader& reader,
   if (ok) {
     t->record_local(addr, size, bytes);
   }
+  return addr;
 }
 
 /**
@@ -1679,6 +2008,202 @@ static bool file_may_need_instrumentation(const AddressSpace::Mapping& map) {
     fsname.find("ld", file_part) != string::npos;
 }
 
+static bool file_may_need_software_counter_instrumentation(
+    const AddressSpace::Mapping& map) {
+  const string& fsname = map.map.fsname();
+  if (fsname.empty() || fsname == "[stack]" || fsname == "[vdso]") {
+    LOG(debug) << "Declining to dynamically software counter instrument: `"
+               << fsname << "` " << map.map.start() << "-" << map.map.end();
+    return false;
+  }
+  size_t file_part = fsname.rfind('/');
+  if (file_part == string::npos) {
+    file_part = 0;
+  } else {
+    ++file_part;
+  }
+  auto ret = fsname.find("librrpage", file_part) != string::npos ||
+             fsname.find(SOFT_COUNT_STUB_TEMP_NAME, file_part) != string::npos;
+  if (ret) {
+    LOG(debug) << "Declining to dynamically software counter instrument: `"
+               << fsname << "` " << map.map.start() << "-" << map.map.end();
+    return false;
+  }
+  return true;
+}
+
+// Should the mapping be software counter instrumented in
+// Monkeypatcher::software_counter_instrument_after_mmap or gradually via the SIGSEGV approach ?
+static bool dynamically_instrument_now(const RecordSession& sess,
+                                       const AddressSpace::Mapping& map) {
+  const string& fsname = map.map.fsname();
+  size_t file_part = fsname.rfind('/');
+  if (file_part == string::npos) {
+    file_part = 0;
+  } else {
+    ++file_part;
+  }
+  // librrpreload.so is internal to rr and a sensitive piece of machinery.
+  // Always instrument in one go aka "now", regardless of what strategy the user
+  // gave us.
+  if (fsname.find("librrpreload.so", file_part) != string::npos) {
+    return true;
+  } else if (sess.software_counting_strategy() == SCS_ALWAYS_JII) {
+    return false;
+  } else if (sess.software_counting_strategy() == SCS_NEVER_JII) {
+    return true;
+  }
+  // SCS_BASIC & SCS_MINIMAL
+  auto ret = fsname.find("libc.so", file_part) != string::npos ||
+             fsname.find("libpthread.so", file_part) != string::npos ||
+             fsname.find("libdl.so", file_part) != string::npos ||
+             fsname.find("librt.so", file_part) != string::npos ||
+             fsname.find("ld-linux-aarch64.so", file_part) != string::npos;
+  return ret;
+}
+
+static bool part_of_minimal_set(const AddressSpace::Mapping& map) {
+  const string& fsname = map.map.fsname();
+  size_t file_part = fsname.rfind('/');
+  if (file_part == string::npos) {
+    file_part = 0;
+  } else {
+    ++file_part;
+  }
+  auto ret = fsname.find("librrpreload.so", file_part) != string::npos ||
+             fsname.find("libc.so", file_part) != string::npos ||
+             fsname.find("libpthread.so", file_part) != string::npos ||
+             fsname.find("libdl.so", file_part) != string::npos ||
+             fsname.find("librt.so", file_part) != string::npos ||
+             fsname.find("ld-linux-aarch64.so", file_part) != string::npos;
+  return ret;
+}
+
+template <typename Arch>
+static void instrument_with_software_counters_arch(
+    Monkeypatcher&, RecordTask& t, const remote_ptr<void>,
+    const remote_ptr<void>, const KernelMapping&, rocksdb::DB&) {
+  ASSERT(&t, false) << "Architecture not supported. enum SupportedArch value: "
+                    << t.arch();
+  __builtin_unreachable();
+}
+
+template <>
+void instrument_with_software_counters_arch<X64Arch>(
+    Monkeypatcher& patcher, RecordTask& t, const remote_ptr<void> addr_start,
+    const remote_ptr<void> addr_end, const KernelMapping& map,
+    rocksdb::DB& db) {
+  vector<uint8_t> stub_buff;
+  stub_buff.resize(SC_X64_PRELUDE_SIZE_BYTES);
+  memcpy(stub_buff.data(), SC_X64_PRELUDE, SC_X64_PRELUDE_SIZE_BYTES);
+  vector<uint8_t> instr_patch;
+
+  ASSERT(&t, map.start() >= addr_start);
+  ASSERT(&t, addr_end <= map.end());
+  const remote_ptr<uint8_t> instrumentation_addr_start =
+      addr_start.cast<uint8_t>();
+  const remote_ptr<uint8_t> instrumentation_addr_end = addr_end.cast<uint8_t>();
+
+  const uint64_t map_file_offset_bytes = map.file_offset_bytes();
+  const auto map_start = map.start();
+  const size_t min_file_offset = map_file_offset_bytes +
+                                 instrumentation_addr_start.as_int() -
+                                 map_start.as_int();
+  const size_t max_file_offset = map_file_offset_bytes +
+                                 instrumentation_addr_end.as_int() -
+                                 map_start.as_int();
+  ASSERT(&t, min_file_offset < max_file_offset);
+
+  const auto upper_bound = rocksdb::Slice(
+      reinterpret_cast<const char*>(&max_file_offset), sizeof(uint64_t));
+  const auto lower_bound = rocksdb::Slice(
+      reinterpret_cast<const char*>(&min_file_offset), sizeof(uint64_t));
+  rocksdb::ReadOptions options;
+  options.iterate_upper_bound = &upper_bound;
+  auto it = unique_ptr<rocksdb::Iterator>(db.NewIterator(options));
+  it->Seek(lower_bound);
+
+  size_t num_patched = 0;
+  while (it->Valid()) {
+    const uint64_t file_offset =
+        *reinterpret_cast<const uint64_t*>(it->key().data());
+    const PatchData* patch_data =
+        reinterpret_cast<const PatchData*>(it->value().data());
+    remote_ptr<uint8_t> instrumentation_addr =
+        map_start.cast<uint8_t>() + (file_offset - map_file_offset_bytes);
+    const vector<uint8_t> insn_bytes =
+        t.read_mem(instrumentation_addr, patch_data->len);
+    if (memcmp(patch_data->data, insn_bytes.data(), patch_data->len)) {
+      it->Next();
+      continue;
+    }
+    const remote_ptr<uint8_t> jump_stub_start =
+        allocate_software_counter_stub_x64(
+            t, patcher.software_counter_stub_areas,
+            patcher.last_used_software_counter_stub_area, instrumentation_addr,
+            *patch_data, stub_buff, instr_patch);
+    if (!jump_stub_start) {
+      it->Next();
+      continue;
+    }
+    ASSERT(&t, instr_patch.size() == insn_bytes.size());
+    write_and_record_mem(&t, instrumentation_addr, instr_patch.data(),
+                         instr_patch.size());
+    write_and_record_mem(&t, jump_stub_start, stub_buff.data(),
+                         stub_buff.size());
+    num_patched++;
+    it->Next();
+  }
+  LOG(debug) << "Patched: " << num_patched << " conditional branches in "
+             << map.fsname() << " from: " << instrumentation_addr_start
+             << " to: " << instrumentation_addr_end;
+}
+
+void Monkeypatcher::instrument_with_software_counters(
+    RecordTask& t, const remote_ptr<void> instrumentation_addr_start,
+    const remote_ptr<void> instrumentation_addr_end, const KernelMapping& map,
+    rocksdb::DB& db) {
+  RR_ARCH_FUNCTION(instrument_with_software_counters_arch, t.arch(), *this, t,
+                   instrumentation_addr_start, instrumentation_addr_end, map,
+                   db);
+}
+
+static ScopedFd get_mapped_file_fd(Task &t, remote_ptr<void> start, size_t size,
+                            int child_fd) {
+  ScopedFd open_fd;
+  if (child_fd >= 0) {
+    open_fd = t.open_fd(child_fd, O_RDONLY);
+    ASSERT(&t, open_fd.is_open()) << "Failed to open child fd " << child_fd;
+  } else {
+    char buf[100];
+    sprintf(buf, "/proc/%d/map_files/%llx-%llx", t.tid,
+            (long long)start.as_int(), (long long)start.as_int() + size);
+    // Reading these directly requires CAP_SYS_ADMIN, so open the link target
+    // instead.
+    char link[PATH_MAX];
+    int ret = readlink(buf, link, sizeof(link) - 1);
+    if (ret < 0) {
+      return open_fd;
+    }
+    link[ret] = 0;
+    LOG(debug) << "Opening file: `" << link << "` corresponding to: `" << buf << "`";
+    char link_in_mnt_namespace[PATH_MAX];
+    // Need to open the file in its own mnt namespace otherwise the content may not be
+    // what is expected. Example: see mount_ns_exec2 test
+    ret = snprintf(link_in_mnt_namespace, PATH_MAX, "/proc/%d/root/%s", t.tid, link);
+    if (ret < 0) {
+      FATAL() << "error in snprintf";
+    }
+    open_fd = ScopedFd(link_in_mnt_namespace, O_RDONLY);
+    if (!open_fd.is_open()) {
+      LOG(warn) << "  ... could not open file: `" << link << "`";
+      return open_fd;
+    }
+  }
+
+  return open_fd;
+}
+
 void Monkeypatcher::patch_after_mmap(RecordTask* t, remote_ptr<void> start,
                                      size_t size, size_t offset_bytes,
                                      int child_fd, MmapMode mode) {
@@ -1766,6 +2291,156 @@ void Monkeypatcher::patch_after_mmap(RecordTask* t, remote_ptr<void> start,
         }
       }
       break;
+  }
+}
+
+static void setup_range_for_SIGSEGV(RecordTask& t,
+                                    const AddressSpace::Mapping& map) {
+  auto orig_prot = map.map.prot();
+  ASSERT(&t, orig_prot & PROT_EXEC);
+  {
+    AutoRemoteSyscalls remote(&t);
+    int mprotect_syscallno = syscall_number_for_mprotect(t.arch());
+    remote.infallible_syscall_if_alive(mprotect_syscallno, map.map.start(),
+                                       map.map.size(), orig_prot & ~PROT_EXEC);
+  }
+  auto& flags = t.vm()->mapping_flags_of(map.map.start());
+  flags |= AddressSpace::Mapping::IS_SOFTWARE_COUNTER_OVERLAY_EXEC;
+  auto maybe_unique_id = t.vm()->mapping_unique_id_of(map.map.start());
+  LOG(debug) << "setup_range_for_SIGSEGV: Adding overlay exec from: "
+             << map.map.start() << "-" << map.map.end() << " for `"
+             << map.map.fsname() << "` with unique id:`"
+             << (maybe_unique_id ? *maybe_unique_id : "-- not found --") << "`";
+  auto map_start = map.map.start();
+  auto map_size = map.map.size();
+  t.vm()->protect(&t, map_start, map_size, orig_prot & ~PROT_EXEC);
+
+  struct mprotect_record rec{ .start = map_start.as_int(),
+                              .size = map_size,
+                              .prot = orig_prot & ~PROT_EXEC,
+                              .overlay_exec = 1 };
+  t.ev().Syscall().mprotect_records.push_back(rec);
+}
+
+void Monkeypatcher::software_counter_instrument_after_mmap(
+    RecordTask& t, const remote_ptr<void> start_region,
+    const size_t size_region, const size_t, const int child_fd,
+    const MmapMode) {
+  if (!t.hpc.is_software_counter()) {
+    return;
+  }
+
+  auto& map = t.vm()->mapping_of(start_region);
+  // dont want to inadvertently change a file on disk when instrumentation
+  // is done
+  if (map.map.flags() & MAP_SHARED) {
+    LOG(debug) << "map `" << map.map.fsname() << "` from: " << map.map.start()
+               << "-" << map.map.end() << " is MAP_SHARED, skipping";
+    return;
+  }
+
+  if (!(map.map.prot() & PROT_EXEC)) {
+    LOG(debug) << "map `" << map.map.fsname() << "` from: " << map.map.start()
+               << "-" << map.map.end() << " is not PROT_EXEC, skipping";
+    return;
+  }
+
+  if (!file_may_need_software_counter_instrumentation(map)) {
+    return;
+  }
+
+  // if the SCS_MINIMAL strategy is active, only a select set of shared
+  // libraries will be instrumented. If map.map.fsname() is not part of that,
+  // immediately return
+  if (t.session().software_counting_strategy() == SCS_MINIMAL &&
+      !part_of_minimal_set(map)) {
+    return;
+  }
+
+  ScopedFd open_fd = get_mapped_file_fd(t, start_region, size_region, child_fd);
+  if (!open_fd.is_open()) {
+    return;
+  }
+  bool ok = true;
+  ElfFileReader reader(open_fd, t.arch(), &ok);
+  if (!ok) {
+    return;
+  }
+  auto unique_id = reader.read_buildid();
+  if (unique_id.size()) {
+    auto& maybe_unique_id = t.vm()->mapping_unique_id_of(start_region);
+    // Assign the unique id, note the type above is an auto&
+    maybe_unique_id = unique_id;
+  } else {
+    // TODO: do a sha256sum in the mount namespace of the the executable ??
+    unique_id = sha256sum(map.map.fsname());
+    if (!unique_id.size()) {
+      return;
+    }
+    // Add a prefix to disambiguate with normal build-id unique ids
+    unique_id = "sha256=" + unique_id;
+    auto& maybe_unique_id = t.vm()->mapping_unique_id_of(start_region);
+    // Assign the unique id, note the type above is an auto&
+    maybe_unique_id = unique_id;
+    LOG(warn) << map.map.fsname()
+              << " does not have a build_id, using file sha256sum of "
+              << unique_id << " as the unique id";
+  }
+
+  auto it = t.session().patchdb_map.find(unique_id);
+  if (it == t.session().patchdb_map.end()) {
+    // Check for symbols first in the library itself, regardless of whether
+    // there is a debuglink.  For example, on Fedora 26, the .symtab and
+    // .strtab sections are stripped from the debuginfo file for
+    // libpthread.so.
+    SymbolTable syms = reader.read_symbols(".symtab", ".strtab");
+    if (syms.size() == 0) {
+      ScopedFd debug_fd = reader.open_debug_file(map.map.fsname());
+      if (debug_fd.is_open()) {
+        ElfFileReader debug_reader(debug_fd, t.arch());
+        syms = debug_reader.read_symbols(".symtab", ".strtab");
+      }
+    }
+
+    if (syms.size()) {
+      LOG(debug) << syms.size()
+                 << " symbols available for: " << map.map.fsname();
+    } else {
+      // Even if syms.size() is 0, might still want instrument without symbols
+      // in the future, either on the fly via SIGSEGV or now (FEATURE
+      // UNIMPLEMENTED)
+      //
+      // XXX: This might be only practical on aarch64 as on x64 could be
+      // difficult to do disassembly without symbols and the danger of
+      // accidently disassembling data embedded in code !?? Then again
+      // it's probably not fully safe on aarch64 also ??
+      return;
+    }
+    t.session().get_or_create_db_of_patch_locations(t, map.map.fsname(), reader,
+                                                    syms, unique_id);
+  }
+  it = t.session().patchdb_map.find(unique_id);
+  ASSERT(&t, it != t.session().patchdb_map.end());
+
+  RecordSession::cached_data cached_data = {
+    *it->second.db, it->second.already_statically_instrumented
+  };
+
+  // no point in either deferring instrumentation or doing it now
+  // cause it's already done statically !
+  if (cached_data.already_statically_instrumented) {
+    return;
+  }
+
+  if (dynamically_instrument_now(t.session(), map)) {
+    // at "one go" or in other words, now !
+    instrument_with_software_counters(
+        t, start_region, start_region + size_region, map.map, cached_data.db);
+  } else {
+    LOG(debug) << "Skipping software counter instrumentation of `"
+               << map.map.fsname()
+               << "`. It will be done \"just in time\" via SIGSEGV approach";
+    setup_range_for_SIGSEGV(t, map);
   }
 }
 

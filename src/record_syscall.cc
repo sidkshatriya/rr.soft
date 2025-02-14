@@ -5287,24 +5287,42 @@ static Switchable rec_prepare_syscall_arch(RecordTask* t,
       // Since this is "user" facing, we follow best practices for regular
       // syscalls and make sure that unused arguments (in this case all of them)
       // are zero.
-      bool arguments_are_zero = true;
+      // This syscall also serves another function: it allows
+      // the program to query if rr is running in software counters mode. To
+      // query, arg2 should be set to 1. In that case the system returns 1 to
+      // indicate that yes, software counters are being used. As always, the
+      // syscall can be called with arg2 == 0 even in software counters mode
+      // to do a plain vanilla rr presence check.
       Registers r = t->regs();
-      int first_zero_reg = 1;
-      uintptr_t ret = 0;
-      if (r.arg(1) == RRCALL_CHECK_SYSCALLBUF_USED_OR_DISABLED) {
-        if (!!getenv(SYSCALLBUF_ENABLED_ENV_VAR)) {
-          // Syscallbuf is enabled, but we reached here anyway. Return -ENOTSUP.
-          ret = (uintptr_t)-ENOTSUP;
+      if (r.arg(2) == 1 && t->hpc.is_software_counter()) {
+        bool arguments_are_valid = true;
+        for (int i = 1; i <= 6; ++i) {
+          if (i == 2) {
+            continue;
+          }
+          arguments_are_valid &= r.arg(i) == 0;
         }
-        first_zero_reg = 2;
+        syscall_state.emulate_result(arguments_are_valid ? 1
+                                                         : (uintptr_t)-EINVAL);
+      } else {
+        bool arguments_are_zero = true;
+        int first_zero_reg = 1;
+        uintptr_t ret = 0;
+        if (r.arg(1) == RRCALL_CHECK_SYSCALLBUF_USED_OR_DISABLED) {
+          if (!!getenv(SYSCALLBUF_ENABLED_ENV_VAR)) {
+            // Syscallbuf is enabled, but we reached here anyway. Return -ENOTSUP.
+            ret = (uintptr_t)-ENOTSUP;
+          }
+          first_zero_reg = 2;
+        }
+        for (int i = first_zero_reg; i <= 6; ++i) {
+          arguments_are_zero &= r.arg(i) == 0;
+        }
+        if (!arguments_are_zero)
+          syscall_state.emulate_result((uintptr_t)-EINVAL);
+        else
+          syscall_state.emulate_result(ret);
       }
-      for (int i = first_zero_reg; i <= 6; ++i) {
-        arguments_are_zero &= r.arg(i) == 0;
-      }
-      if (!arguments_are_zero)
-        syscall_state.emulate_result((uintptr_t)-EINVAL);
-      else
-        syscall_state.emulate_result(ret);
       syscall_state.expect_errno = ENOSYS;
       return PREVENT_SWITCH;
     }
@@ -6263,6 +6281,8 @@ static void process_mmap(RecordTask* t, size_t length, int prot, int flags,
   // file.
   if (!(flags & MAP_SHARED)) {
     t->vm()->monkeypatcher().patch_after_mmap(t, addr, size, offset, fd,
+                                              Monkeypatcher::MMAP_SYSCALL);
+    t->vm()->monkeypatcher().software_counter_instrument_after_mmap(*t, addr, size, offset, fd,
                                               Monkeypatcher::MMAP_SYSCALL);
   }
 

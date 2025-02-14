@@ -27,10 +27,16 @@
 #include <set>
 #include <sstream>
 
+#ifdef __x86_64__
+#include <Zydis/Mnemonic.h>
+#include <Zydis/Decoder.h>
+#endif
+
 #include <rr/rr.h>
 
 #include "Task.h"
 
+#include "Registers.h"
 #include "preload/preload_interface.h"
 
 #include "AutoRemoteSyscalls.h"
@@ -65,6 +71,16 @@ namespace rr {
 
 static const unsigned int NUM_X86_DEBUG_REGS = 8;
 static const unsigned int NUM_X86_WATCHPOINTS = 4;
+
+static WaitStatus make_pending_signal_TIME_SLICE_SIGNAL(siginfo_t &pending) {
+  WaitStatus status = WaitStatus::for_stop_sig(PerfCounters::TIME_SLICE_SIGNAL);
+  memset(&pending, 0, sizeof(pending));
+  pending.si_signo = PerfCounters::TIME_SLICE_SIGNAL;
+  // This never really came from a ticks_interrupt fd
+  pending.si_fd = -1;
+  pending.si_code = POLL_IN;
+  return status;
+}
 
 Task::Task(Session& session, pid_t _tid, pid_t _rec_tid, uint32_t serial,
            SupportedArch a)
@@ -1609,13 +1625,18 @@ bool Task::resume_execution(ResumeRequest how, WaitRequest wait_how,
   // counters later than this, because we want to minimize the time
   // between the wait_stop_or_exit below and the PTRACE_CONT.
   if (tick_period != RESUME_NO_TICKS) {
+    // This should be the first thing as hpc.start() will
+    // reset the counter. For software counters we need to make sure
+    // it resets after relevant thread locals have been swapped in.
+    activate_preload_thread_locals();
     if (tick_period == RESUME_UNLIMITED_TICKS) {
       hpc.start(this, 0);
     } else {
       ASSERT(this, tick_period >= 0 && tick_period <= MAX_TICKS_REQUEST);
       hpc.start(this, max<Ticks>(1, tick_period));
     }
-    activate_preload_thread_locals();
+  } else if (hpc.is_software_counter()) {
+    reset_soft_counter(INT64_MAX);
   }
 
   if (session().is_recording() && !seen_ptrace_exit_event()) {
@@ -2262,6 +2283,33 @@ static bool simulate_transient_error(Task* t) {
   return true;
 }
 
+// Assumes that this Task is doing software counting
+bool Task::did_static_software_counter_fire(WaitStatus status) {
+  if (arch() != x86_64 && arch() != aarch64) {
+    return false;
+  }
+  if (status.stop_sig() != SIGTRAP) {
+    return false;
+  }
+  void* actual_thread_locals = preload_thread_locals();
+  if (!actual_thread_locals) {
+    return false;
+  }
+
+  if (arch() == x86_64) {
+    auto p = static_cast<::preload_thread_locals<X64Arch> const*>(
+        actual_thread_locals);
+    bool ret = p->ticks_target_was_reached_break;
+    return ret;
+  } else if (arch() == aarch64) {
+    auto p = static_cast<::preload_thread_locals<ARM64Arch> const*>(
+        actual_thread_locals);
+    bool ret = p->ticks_target_was_reached_break;
+    return ret;
+  }
+  __builtin_unreachable();
+}
+
 static bool ignore_signal_for_detached_proxy(int sig) {
   switch (sig) {
     case SIGSTOP:
@@ -2290,6 +2338,7 @@ bool Task::did_waitpid(WaitStatus status) {
   bool in_injectable_signal_stop =
     status.stop_sig() > 0 && status.stop_sig() != SIGTRAP;
 
+  bool static_software_counter_fired = false;
   if (status.reaped()) {
     was_reaped_ = true;
     if (handled_ptrace_exit_event_) {
@@ -2334,6 +2383,15 @@ bool Task::did_waitpid(WaitStatus status) {
       pending_siginfo.si_fd = hpc.ticks_interrupt_fd();
       pending_siginfo.si_code = POLL_IN;
       // Don't try to inject signals into ptrace-interrupt stops
+      in_injectable_signal_stop = false;
+    } else if (hpc.is_software_counter() && did_static_software_counter_fire(status)) {
+      // Now that we know an int3/brk did fire and it was intended to indicate that we reached a ticks target,
+      // pretend that we actually saw a TIME_SLICE_SIGNAL
+      LOG(debug) << "replacing pending_siginfo with a TIME_SLICE_SIGNAL";
+      status = make_pending_signal_TIME_SLICE_SIGNAL(pending_siginfo);
+      static_software_counter_fired = true;
+      // Since this is is really a SIGTRAP, it is already set to false above
+      // However, setting here for emphasis.
       in_injectable_signal_stop = false;
     } else if (status.stop_sig()) {
       if (!ptrace_if_stopped(PTRACE_GETSIGINFO, nullptr, &pending_siginfo)) {
@@ -2425,6 +2483,43 @@ bool Task::did_waitpid(WaitStatus status) {
   in_injectable_signal_stop_ = in_injectable_signal_stop;
   session().accumulate_ticks_processed(more_ticks);
   ticks += more_ticks;
+
+  if (hpc.is_software_counter()) {
+    if (static_software_counter_fired) {
+      LOG(debug) << "statically instrumented software counter fired at ip: "
+                 << ip();
+    }
+
+    if (maybe_move_out_of_static_software_counter_critical_section()) {
+      LOG(debug) << "  was stopped in a statically instrumented software "
+                    "counter critical section, adjusted ip() to: "
+                 << ip();
+    }
+
+    if ((stop_sig() || status.ptrace_event() == PTRACE_EVENT_EXIT) &&
+        is_in_dynamic_software_counter_patch_stub(ip())) {
+      if (dynamic_software_counter_fired()) {
+        LOG(debug) << "dynamically instrumented software counter fired at ip: "
+                   << ip();
+        // Now that we know a brk/int3 did fire and it was intended to indicate that
+        // we reached a ticks target, pretend that we actually saw a
+        // TIME_SLICE_SIGNAL
+        //
+        // Note this is going to overwrite the pending_siginfo for SIGTRAP
+        // Unavoidable to do this in such a roundabout way because we needed
+        // registers to determine whether a dynamic software counter fired
+        LOG(debug) << "replacing pending_siginfo with a TIME_SLICE_SIGNAL";
+        wait_status = make_pending_signal_TIME_SLICE_SIGNAL(pending_siginfo);
+        in_injectable_signal_stop_ = false;
+      }
+
+      if (maybe_move_out_of_dynamic_software_counter_stub()) {
+        LOG(debug) << "  was stopped in dynamic software counters stub, "
+                      "adjusted ip() to: "
+                   << ip();
+      }
+    }
+  }
 
   if (was_reaped_) {
     ASSERT(this, !handled_ptrace_exit_event_);
@@ -3887,6 +3982,58 @@ void* Task::preload_thread_locals() {
   return preload_thread_locals_local_addr(*as);
 }
 
+// Note that even though the software counter always counts
+// its counts will be ignored if it is !counting
+void Task::reset_soft_counter(int64_t tick_period) {
+  if (arch() == x86_64) {
+    auto p =
+        static_cast<::preload_thread_locals<X64Arch>*>(preload_thread_locals());
+    if (p) {
+      p->current_ticks = 0;
+      p->ticks_target = tick_period;
+      p->ticks_target_was_reached_break = 0;
+      p->accum_ticks = ticks;
+      p->rec_tid = rec_tid;
+      p->trace_time = trace_time();
+    }
+  } else if (arch() == aarch64) {
+    auto p = static_cast<::preload_thread_locals<ARM64Arch>*>(
+        preload_thread_locals());
+    if (p) {
+      p->current_ticks = 0;
+      p->ticks_target = tick_period;
+      p->ticks_target_was_reached_break = 0;
+      p->accum_ticks = ticks;
+      p->rec_tid = rec_tid;
+      p->trace_time = trace_time();
+    }
+  } else {
+    ASSERT(this, false)
+        << "Architecture not supported. enum SupportedArch value: " << arch();
+    __builtin_unreachable();
+  }
+}
+
+// Assumes that Task t is doing software counting
+int64_t Task::read_soft_counter() {
+  if (arch() != x86_64 && arch() != aarch64) {
+    ASSERT(this, false)
+        << "Architecture not supported. enum SupportedArch value: " << arch();
+    __builtin_unreachable();
+  }
+  fetch_preload_thread_locals();
+  if (arch() == x86_64) {
+    auto p =
+        reinterpret_cast<::preload_thread_locals<X64Arch>*>(&thread_locals[0]);
+    return p->current_ticks;
+  } else if (arch() == aarch64) {
+    auto p = reinterpret_cast<::preload_thread_locals<ARM64Arch>*>(
+        &thread_locals[0]);
+    return p->current_ticks;
+  }
+  __builtin_unreachable();
+}
+
 static bool file_was_deleted(string s) {
   static const char deleted[] = " (deleted)";
   ssize_t find_deleted = s.size() - (sizeof(deleted) - 1);
@@ -4475,14 +4622,486 @@ bool Task::move_to_signal_stop()
     if (!resume_execution(RESUME_SINGLESTEP, RESUME_WAIT_NO_EXIT, RESUME_NO_TICKS)) {
       return false;
     }
-    ASSERT(this, old_ip == ip())
-        << "Singlestep actually advanced when we "
-        << "just expected a signal; was at " << old_ip << " now at "
-        << ip() << " with status " << status();
+    // The ip() can be adjusted to be outside a software counting critical section when using software counters
+    // Hence this ASSERT is only valid when not using software counters
+    if (!hpc.is_software_counter()) {
+      ASSERT(this, old_ip == ip())
+          << "Singlestep actually advanced when we "
+          << "just expected a signal; was at " << old_ip << " now at "
+          << ip() << " with status " << status();
+    }
     // Ignore any pending TIME_SLICE_SIGNALs and continue until we get our
     // SYSCALLBUF_DESCHED_SIGNAL.
   } while (stop_sig() == PerfCounters::TIME_SLICE_SIGNAL);
   return true;
+}
+
+bool Task::is_in_dynamic_software_counter_patch_stub(remote_code_ptr ip) {
+  if (!hpc.is_software_counter()) {
+      return false;
+  }
+  auto p = ip.to_data_ptr<void>();
+  auto has_mapping = vm()->has_mapping(p);
+
+  if (has_mapping) {
+    const auto flag = vm()->mapping_flags_of(p) &
+                      AddressSpace::Mapping::IS_SOFTWARE_COUNTER_PATCH_STUBS;
+    return flag != 0;
+  }
+  return false;
+}
+
+// Assumes program ip is in dynamic software counters stub region
+// Don't call this method if it isn't !
+bool Task::dynamic_software_counter_fired() {
+  DEBUG_ASSERT(is_in_dynamic_software_counter_patch_stub(ip()));
+  if (arch() == x86_64) {
+    // x86 moves the ip forward by 1 byte after the int3 is taken
+    // 0xcc is `int3`
+    bool ret = stop_sig() == SIGTRAP && !ip().is_null() &&
+               is_in_dynamic_software_counter_patch_stub(ip() - 1) &&
+               read_mem(ip().to_data_ptr<uint8_t>() - 1) == 0xcc;
+    return ret;
+  } else if (arch() == aarch64) {
+    // 0xd4200000 is `brk #0`
+    return stop_sig() == SIGTRAP &&
+           read_mem(ip().to_data_ptr<uint32_t>()) == 0xd4200000;
+  } else {
+    ASSERT(this, false)
+        << "Architecture not supported. enum SupportedArch value: " << arch();
+    __builtin_unreachable();
+  }
+}
+
+// Assumes program ip is on the jcc instruction in the dynamic counting stub
+static bool jump_stub_condition_x64_is_true(Task& t, const Registers& r, size_t offset = 0) {
+#ifdef __x86_64__
+  const uint64_t rflags = r.flags();
+  const uint64_t rcx = r.cx();
+  ZydisDecoder dissassembler;
+  ZydisDecoderInit(&dissassembler, ZYDIS_MACHINE_MODE_LONG_64,
+                   ZYDIS_STACK_WIDTH_64);
+  vector<uint8_t> insns;
+  insns.resize(6);
+  t.read_bytes_helper(t.ip().to_data_ptr<uint8_t>() + offset, 6, insns.data());
+  ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT];
+  ZydisDecodedInstruction dinsn;
+
+  const auto res = ZydisDecoderDecodeFull(&dissassembler, insns.data(), 6,
+                                          &dinsn, decoded_operands);
+  ASSERT(&t, ZYAN_SUCCESS(res));
+  ASSERT(&t, dinsn.length == 6);
+  ASSERT(&t, dinsn.meta.category == ZYDIS_CATEGORY_COND_BR);
+  ASSERT(&t, dinsn.operand_count > 0 &&
+                 decoded_operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE);
+  // skip over the next jmp rel32 instruction which is 5 bytes long
+  ASSERT(&t, decoded_operands[0].imm.value.s == 5);
+  switch (dinsn.mnemonic) {
+    // also called JC
+    // CF==1
+    case ZYDIS_MNEMONIC_JB:
+      return rflags & X86_CF_FLAG;
+    // CF==1 OR ZF==1
+    case ZYDIS_MNEMONIC_JBE:
+      return (rflags & X86_CF_FLAG) || (rflags & X86_ZF_FLAG);
+    case ZYDIS_MNEMONIC_JCXZ:
+    case ZYDIS_MNEMONIC_JECXZ:
+    case ZYDIS_MNEMONIC_JRCXZ:
+      return rcx == 0;
+    case ZYDIS_MNEMONIC_JKNZD:
+    case ZYDIS_MNEMONIC_JKZD: {
+      FATAL() << "JKNZD/JKZD not implemented";
+      __builtin_unreachable();
+    }
+    // SF != OF
+    case ZYDIS_MNEMONIC_JL:
+      return !!(rflags & X86_SF_FLAG) != !!(rflags & X86_OF_FLAG);
+    // ZF==1 OR SF != OF
+    case ZYDIS_MNEMONIC_JLE:
+      return (rflags & X86_ZF_FLAG) ||
+             (!!(rflags & X86_SF_FLAG) != !!(rflags & X86_OF_FLAG));
+    // also called JAE
+    // CF==0
+    case ZYDIS_MNEMONIC_JNB:
+      return !(rflags & X86_CF_FLAG);
+    // also called JA
+    // CF==0 AND ZF==0
+    case ZYDIS_MNEMONIC_JNBE:
+      return !(rflags & X86_CF_FLAG) && !(rflags & X86_ZF_FLAG);
+    // also called JGE
+    // SF==OF
+    case ZYDIS_MNEMONIC_JNL:
+      return (!!(rflags & X86_SF_FLAG) == !!(rflags & X86_OF_FLAG));
+    // also called JG
+    // ZF=0 AND SF==OF
+    case ZYDIS_MNEMONIC_JNLE:
+      return !(rflags & X86_ZF_FLAG) &&
+             (!!(rflags & X86_SF_FLAG) == !!(rflags & X86_OF_FLAG));
+    // OF==0
+    case ZYDIS_MNEMONIC_JNO:
+      return !(rflags & X86_OF_FLAG);
+    // PF==0
+    case ZYDIS_MNEMONIC_JNP:
+      return !(rflags & X86_PF_FLAG);
+    // SF==0
+    case ZYDIS_MNEMONIC_JNS:
+      return !(rflags & X86_SF_FLAG);
+    // ZF==0
+    case ZYDIS_MNEMONIC_JNZ:
+      return !(rflags & X86_ZF_FLAG);
+    // OF==1
+    case ZYDIS_MNEMONIC_JO:
+      return rflags & X86_OF_FLAG;
+    // PF==1
+    case ZYDIS_MNEMONIC_JP:
+      return rflags & X86_PF_FLAG;
+    // SF==1
+    case ZYDIS_MNEMONIC_JS:
+      return rflags & X86_SF_FLAG;
+    // also called JE
+    // ZF==1
+    case ZYDIS_MNEMONIC_JZ:
+      return rflags & X86_ZF_FLAG;
+    default: {
+      ASSERT(&t, false)
+          << "Unexpected conditional branch instruction with code: "
+          << dinsn.mnemonic;
+      __builtin_unreachable();
+      break;
+    }
+  };
+#else
+  return true;
+#endif
+}
+
+bool Task::must_avoid_move_out_of_dynamic_software_counter_stub(
+    remote_ptr<void> faulting_sp) {
+  if (stop_sig() == SIGBUS) {
+    wait_status = make_pending_signal_TIME_SLICE_SIGNAL(pending_siginfo);
+  }
+  if (stop_sig() == SIGSEGV) {
+    if (session().is_recording() && !vm()->has_mapping(faulting_sp)) {
+      auto rt = static_cast<RecordTask*>(this);
+      if (rt->can_grow_map(faulting_sp)) {
+        LOG(debug) << "Can grow map, not changing ip() and moving out of "
+                      "dynamic software counter stub";
+        return true;
+      }
+    }
+    wait_status = make_pending_signal_TIME_SLICE_SIGNAL(pending_siginfo);
+  }
+  return false;
+}
+
+template <typename Arch>
+// Assumes code is in software counter stub
+// friend to the class Task
+bool maybe_move_out_of_dynamic_software_counter_stub_arch(Task& t) {
+  ASSERT(&t, false) << "Architecture not supported. enum SupportedArch value: "
+                    << t.arch();
+  __builtin_unreachable();
+}
+
+// offset is number of bytes to the jcc instruction
+static void calc_and_set_next_ip(Task& t, Registers& r, const size_t offset) {
+  int64_t imm = 0;
+  uint64_t next_ip = 0;
+  if (jump_stub_condition_x64_is_true(t, r, offset)) {
+    imm = static_cast<int64_t>(
+        t.read_mem((r.ip() + offset + 11 + 1).to_data_ptr<int32_t>()));
+    next_ip = r.ip().to_data_ptr<uint8_t>().as_int() + offset + 11 + 5 + imm;
+  } else {
+    imm = static_cast<int64_t>(
+        t.read_mem((r.ip() + offset + 6 + 1).to_data_ptr<int32_t>()));
+    next_ip = r.ip().to_data_ptr<uint8_t>().as_int() + offset + 6 + 5 + imm;
+  }
+  r.set_ip(next_ip);
+}
+
+static void restore_r11_flags_rsp_and_set_next_ip(Task& t, Registers& r,
+                                                  void* preload_thread_locals,
+                                                  const size_t offset) {
+  auto p =
+      static_cast<::preload_thread_locals<X64Arch>*>(preload_thread_locals);
+  uint64_t stored_r11 = p->scratch_space[1];
+  r.set_r11(stored_r11);
+
+  uint64_t stored_flags = p->scratch_space[2];
+  r.set_flags(stored_flags);
+
+  uint64_t stored_rsp = p->scratch_space[3];
+  r.set_sp(stored_rsp);
+
+  calc_and_set_next_ip(t, r, offset);
+}
+
+static void restore_flags_rsp_and_set_next_ip(Task& t, Registers& r,
+                                              void* preload_thread_locals,
+                                              const size_t offset) {
+  auto p =
+      static_cast<::preload_thread_locals<X64Arch>*>(preload_thread_locals);
+  uint64_t stored_flags = p->scratch_space[2];
+  r.set_flags(stored_flags);
+
+  uint64_t stored_rsp = p->scratch_space[3];
+  r.set_sp(stored_rsp);
+
+  calc_and_set_next_ip(t, r, offset);
+}
+
+static void restore_rsp_and_set_next_ip(Task& t, Registers& r,
+                                        void* preload_thread_locals,
+                                        const size_t offset) {
+  auto p =
+      static_cast<::preload_thread_locals<X64Arch>*>(preload_thread_locals);
+  uint64_t stored_rsp = p->scratch_space[3];
+  r.set_sp(stored_rsp);
+
+  calc_and_set_next_ip(t, r, offset);
+}
+
+template <>
+// Assumes code is in dynamic software counter stub
+//
+// Q. Need to deal with case when ticks target is reached while adjusting ticks ?
+// A. Probably not as this adjustment happens in Task::did_waitpid() as this
+// function is called there. If the ticks target was reached, code that should
+// check this will come after this. This _might_ cause problems in being
+// "off by one" in such situations perhaps -- in that scenario it might be
+// a good idea to set the skid in software counters to simply 1.
+//
+// TODO: Need to consider if counting interruptions will have any impact to
+// data stored in preload locals `scratch_space[3]` so that memory comparisons
+// between record and replay might differ. TL;DR should rsp, r11, flags be
+// always t.write_mem() to preload_thread_locals `scratch_space[3]` ?
+bool maybe_move_out_of_dynamic_software_counter_stub_arch<X64Arch>(Task& t) {
+  LOG(debug)
+      << "Moving program out of software counter critical section, ip(): "
+      << t.ip();
+  const remote_ptr<uint32_t> addr = t.ip().to_data_ptr<uint32_t>();
+  const auto instruction = t.read_mem(addr);
+  LOG(debug) << "  instruction hex codes: " << HEX(instruction);
+  // 00: 0x48, 0x89, 0x24, 0x25, 0xd8, 0x10, 0x00, 0x70  mov    QWORD PTR ds:0x700010d8,rsp
+  // 08: 0x48, 0xc7, 0xc4, 0xd8, 0x10, 0x00, 0x70,       mov    rsp,0x700010d8
+  // 15: 0x9c,                                           pushf
+  // 16: 0x41, 0x53,                                     push   r11
+  // 18: 0xf0, 0x48, 0xff, 0x04, 0x25, 0x90, 0x10, 0x00, 0x70, lock inc QWORD PTR ds:0x70001090
+  // 27: 0x4c, 0x8b, 0x1c, 0x25, 0x90, 0x10, 0x00, 0x70, mov    r11,QWORD PTR ds:0x70001090
+  // 35: 0x4c, 0x3b, 0x1c, 0x25, 0x98, 0x10, 0x00, 0x70, cmp    r11,QWORD PTR ds:0x70001098
+  // 43: 0x7c, 0x01,                                     jl short <<JUMP_LABEL>>
+  // 45: 0xcc,                                           int3
+  // <<JUMP_LABEL>>:
+  // 46: 0x45, 0x31, 0xdb,                               xor    r11d,r11d
+  // 49: 0x41, 0x5b,                                     pop    r11
+  // 51: 0x9d,                                           popf
+  // 52: 0x48, 0x8b, 0x24, 0x25, 0xd8, 0x10, 0x00, 0x70, mov    rsp,QWORD PTR ds:0x700010d8
+  // 60: 0x0f, 0x__, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX        jcc (conditional jump)
+  // 66/71: 0xe9, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX           jmp rel32 (rip relative)
+  auto r = t.regs();
+
+  // 00: 0x48, 0x89, 0x24, 0x25, 0xd8, 0x10, 0x00, 0x70  mov    QWORD PTR ds:0x700010d8,rsp
+  if (instruction == 0x2524'8948) {
+    // r11, flags, rsp unaffected, counting not yet done
+    calc_and_set_next_ip(t, r, 60);
+    t.ticks += 1;
+    t.session().accumulate_ticks_processed(1);
+  }
+  // 08: 0x48, 0xc7, 0xc4, 0xd8, 0x10, 0x00, 0x70,       mov    rsp,0x700010d8
+  else if (instruction == 0xd8c4'c748) {
+    // r11, flags, rsp unaffected, counting not yet done
+    calc_and_set_next_ip(t, r, 52);
+    t.ticks += 1;
+    t.session().accumulate_ticks_processed(1);
+  }
+  // 15: 0x9c,                                           pushf
+  // 16: 0x41, 0x53,                                     push   r11
+  // 18: 0xf0, 0x48, 0xff, 0x04, 0x25, 0x90, 0x10, 0x00, 0x70, lock inc QWORD PTR ds:0x70001090
+  else if (instruction == 0xf053'419c) {
+    // r11, flags unaffected, counting not yet done
+    restore_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 45);
+    t.ticks += 1;
+    t.session().accumulate_ticks_processed(1);
+  }
+  // 16: 0x41, 0x53,                                     push   r11
+  // 18: 0xf0, 0x48, 0xff, 0x04, 0x25, 0x90, 0x10, 0x00, 0x70, lock inc QWORD PTR ds:0x70001090
+  else if (instruction == 0x48f0'5341) {
+    // r11 unaffected, counting not yet done
+    restore_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 44);
+    t.ticks += 1;
+    t.session().accumulate_ticks_processed(1);
+  }
+  // 18: 0xf0, 0x48, 0xff, 0x04, 0x25, 0x90, 0x10, 0x00, 0x70, lock inc QWORD PTR ds:0x70001090
+  else if (instruction == 0x04ff'48f0) {
+    // counting not yet done
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 42);
+    t.ticks += 1;
+    t.session().accumulate_ticks_processed(1);
+  }
+  // 27: 0x4c, 0x8b, 0x1c, 0x25, 0x90, 0x10, 0x00, 0x70, mov    r11,QWORD PTR ds:0x70001090
+  else if (instruction == 0x251c'8b4c) {
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 33);
+  }
+  // 35: 0x4c, 0x3b, 0x1c, 0x25, 0x98, 0x10, 0x00, 0x70, cmp    r11,QWORD PTR ds:0x70001098
+  else if (instruction == 0x251c'3b4c) {
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 25);
+  }
+  // 43: 0x7c, 0x01,                                     jl short <<JUMP_LABEL>>
+  // 45: 0xcc,                                           int3
+  // <<JUMP_LABEL>>:
+  // 46: 0x45, 0x31, 0xdb,                               xor    r11d,r11d
+  else if (instruction == 0x45cc'017c) {
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 17);
+  }
+  // 45: 0xcc,                                           int3
+  // <<JUMP_LABEL>>:
+  // 46: 0x45, 0x31, 0xdb,                               xor    r11d,r11d
+  else if (instruction == 0xdb31'45cc) {
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 15);
+  }
+  // 46: 0x45, 0x31, 0xdb,                               xor    r11d,r11d
+  // 49: 0x41, 0x5b,                                     pop    r11
+  else if (instruction == 0x41db'3145) {
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 14);
+  }
+  // 49: 0x41, 0x5b,                                     pop    r11
+  // 51: 0x9d,                                           popf
+  // 52: 0x48, 0x8b, 0x24, 0x25, 0xd8, 0x10, 0x00, 0x70, mov    rsp,QWORD PTR ds:0x700010d8
+  else if (instruction == 0x489d'5b41) {
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 11);
+  }
+  // 51: 0x9d,                                           popf
+  // 52: 0x48, 0x8b, 0x24, 0x25, 0xd8, 0x10, 0x00, 0x70, mov    rsp,QWORD PTR ds:0x700010d8
+  else if (instruction == 0x248b'489d) {
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 9);
+  }
+  // 52: 0x48, 0x8b, 0x24, 0x25, 0xd8, 0x10, 0x00, 0x70, mov    rsp,QWORD PTR ds:0x700010d8
+  else if (instruction == 0x2524'8b48) {
+    restore_r11_flags_rsp_and_set_next_ip(t, r, t.preload_thread_locals(), 8);
+  }
+  // 60: 0x0f, 0x__, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX        jcc (conditional jump)
+  else if ((instruction & 0x0000'00ff) == 0x0f) {
+    calc_and_set_next_ip(t, r, 0);
+  }
+  // 66/71: 0xe9, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX           jmp rel32 (rip relative)
+  else if ((instruction & 0x0000'00ff) == 0xe9) {
+    int64_t imm = static_cast<int64_t>(t.read_mem((r.ip() + 1).to_data_ptr<int32_t>()));
+    uint64_t next_ip = r.ip().to_data_ptr<uint8_t>().as_int() + 5 + imm;
+    r.set_ip(next_ip);
+  } else {
+    ASSERT(&t, false)
+        << "unknown software counters critical section instruction: "
+        << HEX(instruction);
+  }
+
+  t.set_regs(r);
+  return true;
+}
+
+bool Task::maybe_move_out_of_dynamic_software_counter_stub() {
+  RR_ARCH_FUNCTION(maybe_move_out_of_dynamic_software_counter_stub_arch, arch(), *this);
+}
+
+template <typename Arch>
+bool maybe_move_out_of_static_software_counter_critical_section_arch(Task& t) {
+  ASSERT(&t, false) << "Architecture not supported. enum SupportedArch value: "
+                    << t.arch();
+  __builtin_unreachable();
+}
+
+template<>
+bool maybe_move_out_of_static_software_counter_critical_section_arch<X64Arch>(Task &t)
+{
+  auto rbx = t.regs().arg1();
+  if (rbx != 0xcdef89ab45670123) {
+    return false;
+  }
+  LOG(debug) << "Moving program out of software counter critical section, ip(): " << t.ip();
+  remote_ptr<uint16_t> addr = t.ip().to_data_ptr<uint16_t>();
+  auto instruction = t.read_mem(addr);
+  LOG(debug) << "  instruction hex codes: " << HEX(instruction);
+  //   : 48 bf 23 01 67 45 ab 89 ef cd	movabs	rdi, -0x32107654ba98fedd
+  // 00: f0                           	lock
+  // 01: 48 ff 04 25 90 10 00 70      	inc	qword ptr [0x70001090]
+  // 09: 4c 8b 1c 25 90 10 00 70      	mov	r11, qword ptr [0x70001090]
+  // 17: 4c 3b 1c 25 98 10 00 70      	cmp	r11, qword ptr [0x70001098]
+  // 25: 7c 0f                        	jl	1f
+  // 27: 41 bb 01 00 00 00            	mov	r11d, 0x1
+  // 33: 44 87 1c 25 a8 10 00 70      	xchg	dword ptr [0x700010a8], r11d
+  // 41: cc                           	int3
+  /* 1: */
+  // 42: 45 31 db                     	xor	r11d, r11d
+  // 45: 48 31 ff                     	xor	rdi, rdi
+  // 48:
+
+  auto r = t.regs();
+  // 00: f0                           	lock
+  //   : 48 ff 04 25 90 10 00 70      	inc	qword ptr [0x70001090]
+  if (instruction == 0x48f0) {
+    LOG(debug) << "Found a unexecuted lock incr instruction at ip(): " << r.ip()
+               << "; will add 1 tick";
+    t.session().accumulate_ticks_processed(1);
+    t.ticks += 1;
+    // 48 - 0
+    r.set_ip(r.ip() + 48);
+  }
+  // We really should not find ourselves here as `lock inc` is done as one instruction (?)
+  // 01: 48 ff 04 25 90 10 00 70      	inc	qword ptr [0x70001090]
+  else if (instruction == 0xff48) {
+    ASSERT(&t, false && "the impossible happened");
+  }
+  // 09: 4c 8b 1c 25 90 10 00 70      	mov	r11, qword ptr [0x70001090]
+  else if (instruction == 0x8b4c) {
+    // 48 - 9
+    r.set_ip(r.ip() + 39);
+  }
+  // 17: 4c 3b 1c 25 98 10 00 70      	cmp	r11, qword ptr [0x70001098]
+  else if (instruction == 0x3b4c) {
+    r.set_ip(r.ip() + 31);
+  }
+  // 25: 7c 0f                        	jl	1f
+  else if (instruction == 0x0f7c) {
+    r.set_ip(r.ip() + 23);
+  }
+  // 27: 41 bb 01 00 00 00            	mov	r11d, 0x1
+  else if (instruction == 0xbb41) {
+    r.set_ip(r.ip() + 21);
+  }
+  // 33: 44 87 1c 25 a8 10 00 70      	xchg	dword ptr [0x700010a8], r11d
+  else if (instruction == 0x8744) {
+    r.set_ip(r.ip() + 15);
+  }
+  // 41: cc                           	int3
+  //   : 45 31 db                     	xor	r11d, r11d
+  else if (instruction == 0x45cc) {
+    r.set_ip(r.ip() + 7);
+  }
+  // 42: 45 31 db                     	xor	r11d, r11d
+  else if (instruction == 0x3145) {
+    r.set_ip(r.ip() + 6);
+  }
+  // 45: 48 31 ff                     	xor	rdi, rdi
+  else if (instruction == 0x3148) {
+    r.set_ip(r.ip() + 3);
+  }
+  else {
+    LOG(error) << "unknown software counters critical section instruction hex codes: " << HEX(instruction);
+    // TODO: Another approach might be to return false here and assume that the register rbx acquired
+    // the sentinel value by coincidence.
+    ASSERT(&t, false && "unknown software counters critical section instruction");
+  }
+
+  r.set_r11(0);
+  // rbx
+  r.set_arg1(0);
+  t.set_regs(r);
+  return true;
+}
+
+bool Task::maybe_move_out_of_static_software_counter_critical_section() {
+  RR_ARCH_FUNCTION(
+      maybe_move_out_of_static_software_counter_critical_section_arch, arch(),
+      *this);
 }
 
 bool Task::should_apply_rseq_abort(EventType event_type, remote_code_ptr* new_ip,
@@ -4533,6 +5152,29 @@ bool Task::should_apply_rseq_abort(EventType event_type, remote_code_ptr* new_ip
   }
   *new_ip = remote_code_ptr(rseq_cs.abort_ip);
   return true;
+}
+
+bool Task::is_in_static_software_counter_critical_section() {
+  if (!hpc.is_software_counter()) {
+      return false;
+  }
+  uintptr_t reg;
+  if (arch() == x86_64) {
+    reg = regs().arg1();
+  } else if (arch() == aarch64) {
+    reg = regs().arg2();
+  } else {
+    ASSERT(this, false)
+        << "Architecture not supported. enum SupportedArch value: " << arch();
+    __builtin_unreachable();
+  }
+  // TODO: A more rigorous way would be to read some bytes around the ip()
+  // to verify if we recognize them. This would be of course slower but this
+  // function may not be called too frequently anyways.
+  if (reg == 0xcdef89ab45670123) {
+    return true;
+  }
+  return false;
 }
 
 }

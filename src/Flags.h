@@ -73,6 +73,8 @@ struct Flags {
   // User override for the path to page files and other resources.
   std::string resource_path;
 
+  bool software_counters;
+
   Flags()
       : checksum(CHECKSUM_NONE),
         dump_on(DUMP_ON_NONE),
@@ -83,7 +85,8 @@ struct Flags {
         suppress_environment_warnings(false),
         fatal_errors_and_warnings(false),
         disable_cpuid_faulting(false),
-        disable_ptrace_exit_events(false) {}
+        disable_ptrace_exit_events(false),
+        software_counters(false) {}
 
   static const Flags& get() { return singleton; }
 

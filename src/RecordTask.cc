@@ -1460,7 +1460,9 @@ void RecordTask::stash_sig() {
   }
 
   const siginfo_t& si = get_siginfo();
-  stashed_signals.push_back(StashedSignal(si, is_deterministic_signal(this), ip()));
+  stashed_signals.push_back(StashedSignal(
+      si, is_deterministic_signal(this), ip()));
+
   // Once we've stashed a signal, stop at the next traced/untraced syscall to
   // check whether we need to process the signal before it runs.
   stashed_signals_blocking_more_signals =
@@ -2361,6 +2363,45 @@ bool RecordTask::try_grow_map(remote_ptr<void> addr) {
   record_event(Event::grow_map(), RecordTask::DONT_FLUSH_SYSCALLBUF);
   LOG(debug) << "try_grow_map " << addr << ": extended map "
              << vm()->mapping_of(addr).map;
+  return true;
+}
+
+bool RecordTask::can_grow_map(remote_ptr<void> addr) {
+  if (vm()->has_mapping(addr)) {
+    LOG(debug) << "can_grow_map " << addr << ": address already mapped";
+    return false;
+  }
+  auto maps = vm()->maps_starting_at(floor_page_size(addr));
+  auto it = maps.begin();
+  if (it == maps.end()) {
+    LOG(debug) << "can_grow_map " << addr << ": no later map to grow downward";
+    return false;
+  }
+  if (!(it->map.flags() & MAP_GROWSDOWN)) {
+    LOG(debug) << "can_grow_map " << addr << ": map is not MAP_GROWSDOWN ("
+               << it->map << ")";
+    return false;
+  }
+  if (addr >= page_size() && vm()->has_mapping(addr - page_size())) {
+    LOG(debug) << "can_grow_map " << addr << ": address would be in guard page";
+    return false;
+  }
+  remote_ptr<void> limit_bottom;
+#if defined (__i386__)
+  struct rlimit stack_limit;
+  int ret = prlimit(tid, RLIMIT_STACK, NULL, &stack_limit);
+#else
+  struct rlimit64 stack_limit;
+  int ret = syscall(__NR_prlimit64, tid, RLIMIT_STACK, (void*)0, &stack_limit);
+#endif
+  if (ret >= 0 && stack_limit.rlim_cur != RLIM_INFINITY) {
+    limit_bottom = ceil_page_size(it->map.end() - stack_limit.rlim_cur);
+    if (limit_bottom > addr) {
+      LOG(debug) << "can_grow_map " << addr << ": RLIMIT_STACK exceeded";
+      return false;
+    }
+  }
+
   return true;
 }
 

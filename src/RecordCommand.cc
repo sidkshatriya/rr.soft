@@ -193,6 +193,8 @@ struct RecordFlags {
   /* True if we should check files being mapped outside of the recording. */
   bool check_outside_mmaps;
 
+  SC_Strategy software_counting_strategy;
+
   RecordFlags()
       : max_ticks(Scheduler::DEFAULT_MAX_TICKS),
         ignore_sig(0),
@@ -218,7 +220,8 @@ struct RecordFlags {
         asan(false),
         tsan(false),
         intel_pt(false),
-        check_outside_mmaps(false) {}
+        check_outside_mmaps(false),
+        software_counting_strategy(SC_Strategy::SCS_ALWAYS_JII) {}
 };
 
 static void parse_signal_name(ParsedOption& opt) {
@@ -282,6 +285,7 @@ static bool parse_record_arg(vector<string>& args, RecordFlags& flags) {
     { 18, "tsan", NO_PARAMETER },
     { 19, "intel-pt", NO_PARAMETER },
     { 20, "check-outside-mmaps", NO_PARAMETER },
+    { 21, "scs", HAS_PARAMETER },
     { 'c', "num-cpu-ticks", HAS_PARAMETER },
     { 'h', "chaos", NO_PARAMETER },
     { 'i', "ignore-signal", HAS_PARAMETER },
@@ -501,6 +505,21 @@ static bool parse_record_arg(vector<string>& args, RecordFlags& flags) {
     case 20:
       flags.check_outside_mmaps = true;
       break;
+    case 21:
+      if (opt.value == "basic") {
+        flags.software_counting_strategy = SCS_BASIC;
+      } else if (opt.value == "never-jii") {
+        flags.software_counting_strategy = SCS_NEVER_JII;
+      } else if (opt.value == "always-jii") {
+        flags.software_counting_strategy = SCS_ALWAYS_JII;
+      } else if (opt.value == "minimal") {
+        flags.software_counting_strategy = SCS_MINIMAL;
+      } else {
+        FATAL() << "Unknown software counting strategy `" << opt.value << "`"
+                << " valid values are `default`, `never-jii`, `always-jii`, "
+                   "`minimal`";
+      }
+      break;
     case 's':
       flags.always_switch = true;
       break;
@@ -597,6 +616,7 @@ static void install_signal_handlers(void) {
 
 static void setup_session_from_flags(RecordSession& session,
                                      const RecordFlags& flags) {
+  session.set_software_counting_strategy(flags.software_counting_strategy);
   session.scheduler().set_max_ticks(flags.max_ticks);
   session.scheduler().set_always_switch(flags.always_switch);
   session.set_enable_chaos(flags.chaos);

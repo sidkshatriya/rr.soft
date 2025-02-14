@@ -10,6 +10,7 @@
 #include <limits>
 #include <unordered_map>
 
+#include "Event.h"
 #include "preload/preload_interface.h"
 
 #include "AddressSpace.h"
@@ -285,6 +286,28 @@ static void dump_events_matching(TraceReader& trace, const DumpFlags& flags,
         auto range = task_events.equal_range(frame.time());
         for (auto it = range.first; it != range.second; ++it) {
           dump_task_event(out, it->second);
+        }
+      }
+      if (flags.dump_mmaps) {
+        if (frame.event().is_syscall_event()) {
+          // TODO raw dump
+          for (auto& record : frame.event().Syscall().mprotect_records) {
+            fprintf(out,
+                    "  { start:%p, size:%" PRIx64
+                    ", prot:'%s', overlay_exec:%d }\n",
+                    (void*)record.start, record.size,
+                    prot_flags_string(record.prot).c_str(),
+                    record.overlay_exec);
+          }
+        }
+        if (frame.event().type() == EV_OVERLAY_PROTECT) {
+          auto record = frame.event().OverlayProtect().mprotect_record;
+          // TODO raw dump
+          fprintf(out,
+                  "  { start:%p, size:%" PRIx64
+                  ", prot:'%s', overlay_exec:%d }\n",
+                  (void*)record.start, record.size,
+                  prot_flags_string(record.prot).c_str(), record.overlay_exec);
         }
       }
 

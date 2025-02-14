@@ -1,17 +1,29 @@
 /* -*- Mode: C++; tab-width: 8; c-basic-offset: 2; indent-tabs-mode: nil; -*- */
 
 #include "RecordSession.h"
+#include "Monkeypatcher.h"
 
 #include <elf.h>
 #include <limits.h>
 #include <linux/capability.h>
 #include <linux/futex.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 
 #include <algorithm>
 #include <sstream>
 #include <string>
+
+#include <rocksdb/db.h>
+#include <rocksdb/options.h>
+#include <rocksdb/write_batch.h>
+#include <rocksdb/compression_type.h>
+
+#ifdef __x86_64__
+#include <Zydis/Zydis.h>
+#include <Zydis/MetaInfo.h>
+#endif
 
 #include "AutoRemoteSyscalls.h"
 #include "ElfReader.h"
@@ -24,12 +36,14 @@
 #include "WaitManager.h"
 #include "core.h"
 #include "ftrace.h"
+#include "kernel_abi.h"
 #include "kernel_metadata.h"
 #include "kernel_supplement.h"
 #include "log.h"
 #include "record_signal.h"
 #include "record_syscall.h"
 #include "seccomp-bpf.h"
+#include "util.h"
 
 namespace rr {
 
@@ -2590,6 +2604,23 @@ RecordSession::~RecordSession() {
   // Do this now while we're still a RecordSession. When Session's
   // destructor calls kill_all_tasks(), things turn bad.
   kill_all_tasks();
+
+  for (auto &kv : patchdb_map) {
+    auto status = kv.second.db->Close();
+    DEBUG_ASSERT(status.ok());
+  }
+
+  LOG(info) << "Number of times software counter stub areas could not be located nearby: "
+            << statistics_.sc_no_near_stub_mem;
+  LOG(info) << "Number of software counter jump stub areas mmaped: "
+            << statistics_.sc_jump_areas_mmaped;
+  LOG(info) << "Number of software counter jump stubs allocated: "
+            << statistics_.sc_jump_stubs_allocated;
+  LOG(info) << "Software counter stub capacity fraction full: "
+            << ((double)statistics_.sc_jump_stubs_allocated) /
+                   ((double)statistics_.sc_jump_areas_stub_capacity);
+  LOG(info) << "Number of software counter just in time SIGSEGV experienced: "
+            << statistics_.sc_jii_SIGSEGV;
 }
 
 RecordSession::RecordResult RecordSession::record_step() {
@@ -2867,6 +2898,384 @@ void DisableCPUIDFeatures::amend_cpuid_data(uint32_t eax_in, uint32_t ecx_in,
       break;
     default:
       break;
+  }
+}
+
+class LeComparator : public rocksdb::Comparator {
+  virtual int Compare(const rocksdb::Slice& a,
+                      const rocksdb::Slice& b) const override {
+    auto n1 = *(const uint64_t*)a.data();
+    auto n2 = *(const uint64_t*)b.data();
+    if (n1 > n2) {
+      return 1;
+    } else if (n2 > n1) {
+      return -1;
+    } else {
+      return 0;
+    }
+  };
+  const char* Name() const override { return "LeComparator"; };
+  virtual void FindShortestSeparator(std::string*,
+                                     const rocksdb::Slice&) const override {};
+
+  virtual void FindShortSuccessor(std::string*) const override {};
+} cmp;
+
+std::optional<RecordSession::cached_data>
+RecordSession::get_db_of_patch_locations(const std::string& unique_id) {
+  auto it = patchdb_map.find(unique_id);
+  if (it != patchdb_map.end()) {
+    return { {
+        .db = *it->second.db,
+    } };
+  }
+  return {};
+}
+
+static string default_patch_loc_db_save_dir() {
+  static string cached_dir;
+
+  if (!cached_dir.empty()) {
+    return cached_dir;
+  }
+
+  string dot_dir;
+  const char* home = getenv("HOME");
+  if (home) {
+    dot_dir = string(home) + "/.cache/rr/";
+  }
+  string xdg_dir;
+  const char* xdg_cache_home = getenv("XDG_CACHE_HOME");
+  if (xdg_cache_home) {
+    cached_dir = string(xdg_cache_home) + "/rr/";
+  } else if (home) {
+    cached_dir = dot_dir;
+  }
+
+  return cached_dir;
+}
+
+// Has the side effect of creating this dir, if it does not exist already
+string patch_loc_db_save_dir() {
+  static string cached_dir;
+
+  if (!cached_dir.empty()) {
+    return cached_dir;
+  }
+
+  const char* output_dir = getenv("_RR_PATCH_LOC_DB_DIR");
+  if (output_dir) {
+    cached_dir = output_dir;
+  } else {
+    cached_dir = default_patch_loc_db_save_dir();
+  }
+
+  ensure_dir(cached_dir, "patch location dbs cache dir", S_IRWXU);
+
+  return cached_dir;
+}
+
+template <typename Arch>
+static size_t db_write_arch(const RecordTask& t, const string&, const string&,
+                            ElfFileReader&, const SymbolTable&, rocksdb::DB&,
+                            const rocksdb::WriteOptions) {
+  ASSERT(&t, false) << "Architecture not supported. enum SupportedArch value: "
+                    << t.arch();
+  __builtin_unreachable();
+}
+
+#ifdef __x86_64__
+template <>
+size_t db_write_arch<X64Arch>(
+    const RecordTask& t, const string& unique_id, const string& fsname,
+    ElfFileReader& reader, const SymbolTable& syms, rocksdb::DB& db,
+    const rocksdb::WriteOptions default_write_options) {
+  ZydisDecoder dissassembler;
+  ZydisDecoderInit(&dissassembler, ZYDIS_MACHINE_MODE_LONG_64,
+                   ZYDIS_STACK_WIDTH_64);
+  rocksdb::Status status;
+  const size_t len = syms.size();
+  size_t insns_found = 0;
+  vector<char> slice;
+  for (size_t i = 0; i < len; i++) {
+    if (!syms.symbol_size(i) || syms.symbol_type(i) != STT_FUNC) {
+      continue;
+    }
+    // Batch writes to hopefully speed things up
+    rocksdb::WriteBatch batch;
+    bool abandon_batch = false;
+
+    uint64_t elf_addr = syms.addr(i);
+    uintptr_t file_offset = 0;
+    if (!reader.addr_to_offset(elf_addr, file_offset)) {
+      LOG(warn) << "ELF address " << HEX(elf_addr) << " not in file";
+      continue;
+    }
+    const uint8_t* buf_pointer = static_cast<const uint8_t*>(
+        reader.read_bytes(file_offset, syms.symbol_size(i)));
+    ASSERT(&t, buf_pointer)
+        << "Could not read instructions for symbol: " << syms.name(i);
+
+    const ZyanUSize buf_len = syms.symbol_size(i);
+    ZyanUSize buf_offset = 0;
+
+    ZyanU64 cur_elf_addr = elf_addr;
+    ZyanU64 cur_file_offset = file_offset;
+
+    ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT];
+    ZydisDecodedInstruction dinsn;
+
+    ASSERT(&t, buf_len >= buf_offset);
+    while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(
+        &dissassembler, buf_pointer + buf_offset, buf_len - buf_offset, &dinsn,
+        decoded_operands))) {
+      // TODO: Optional branch hint prefix of 1 byte
+      // TODO: Is the immediate always the first operand ?
+      if (dinsn.length == 6 && dinsn.meta.category == ZYDIS_CATEGORY_COND_BR &&
+          dinsn.operand_count > 0 &&
+          decoded_operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        switch (dinsn.mnemonic) {
+          case ZYDIS_MNEMONIC_JKNZD:
+          case ZYDIS_MNEMONIC_JKZD:
+            // Not supported
+            break;
+          // also called JC
+          case ZYDIS_MNEMONIC_JB:
+          case ZYDIS_MNEMONIC_JBE:
+          case ZYDIS_MNEMONIC_JCXZ:
+          case ZYDIS_MNEMONIC_JECXZ:
+          case ZYDIS_MNEMONIC_JL:
+          case ZYDIS_MNEMONIC_JLE:
+          // also called JAE
+          case ZYDIS_MNEMONIC_JNB:
+          // also called JA
+          case ZYDIS_MNEMONIC_JNBE:
+          // also called JGE
+          case ZYDIS_MNEMONIC_JNL:
+          // also called JG
+          case ZYDIS_MNEMONIC_JNLE:
+          case ZYDIS_MNEMONIC_JNO:
+          case ZYDIS_MNEMONIC_JNP:
+          case ZYDIS_MNEMONIC_JNS:
+          case ZYDIS_MNEMONIC_JNZ:
+          case ZYDIS_MNEMONIC_JO:
+          case ZYDIS_MNEMONIC_JP:
+          case ZYDIS_MNEMONIC_JRCXZ:
+          case ZYDIS_MNEMONIC_JS:
+          // also called JE
+          case ZYDIS_MNEMONIC_JZ: {
+            insns_found++;
+            auto patch_data =
+                PatchData{ .elf_addr = cur_elf_addr,
+                           .category = WIDE_COND_BRANCH,
+                           .len = dinsn.length,
+                           .actual_delta =
+                               decoded_operands[0].imm.value.s + 6 };
+
+            slice.clear();
+            slice.resize(sizeof(PatchData) + dinsn.length);
+            memcpy(slice.data(), &patch_data, sizeof(PatchData));
+            memcpy(slice.data() + sizeof(PatchData), buf_pointer + buf_offset,
+                   dinsn.length);
+
+            status = batch.Put(
+                rocksdb::Slice(reinterpret_cast<const char*>(&cur_file_offset),
+                               sizeof(uint64_t)),
+                rocksdb::Slice(slice.data(), slice.size()));
+            ASSERT(&t, status.ok()) << "could not Put batch";
+          }
+          default:
+            break;
+        }
+      }
+
+      // Get ready for the next instruction
+      buf_offset += dinsn.length;
+      cur_elf_addr += dinsn.length;
+      cur_file_offset += dinsn.length;
+
+      ASSERT(&t, buf_len >= buf_offset);
+    }
+
+    if (!abandon_batch) {
+      status = db.Write(default_write_options, &batch);
+      ASSERT(&t, status.ok()) << "could not Write to db";
+    }
+  }
+
+  LOG(info) << "found: " << insns_found
+            << " patchable instructions in: " << fsname
+            << " with unique id: " << unique_id;
+
+  return insns_found;
+}
+#endif
+
+static size_t db_write(const RecordTask& t, const string& unique_id,
+                       const string& fsname, ElfFileReader& reader,
+                       const SymbolTable& syms, rocksdb::DB& db,
+                       const rocksdb::WriteOptions default_write_options) {
+  RR_ARCH_FUNCTION(db_write_arch, t.arch(), t, unique_id, fsname, reader, syms,
+                   db, default_write_options);
+}
+
+// Assumes build_id is not an empty string, otherwise ASSERTs
+RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
+    const RecordTask& t, const string& fsname, ElfFileReader& reader,
+    SymbolTable& syms, const string& unique_id) {
+  rocksdb::Status status;
+
+  rocksdb::ColumnFamilyDescriptor default_cf_descriptor_tmp;
+  default_cf_descriptor_tmp.options.comparator = &cmp;
+  const auto default_cf_descriptor = default_cf_descriptor_tmp;
+
+  rocksdb::ColumnFamilyDescriptor metadata_cf_descriptor_tmp;
+  metadata_cf_descriptor_tmp.name = "metadata";
+  const auto metadata_cf_descriptor = metadata_cf_descriptor_tmp;
+  vector<rocksdb::ColumnFamilyDescriptor> vec_cfd{ default_cf_descriptor,
+                                                   metadata_cf_descriptor };
+
+  bool already_statically_instrumented = false;
+  ASSERT(&t, unique_id.size());
+  auto it = patchdb_map.find(unique_id);
+  if (it != patchdb_map.end()) {
+    return { .db = *it->second.db,
+             .already_statically_instrumented =
+                 it->second.already_statically_instrumented };
+  }
+  // ensure_dir()s the db_dir exists
+  const string db_dir = patch_loc_db_save_dir();
+  const string final_db_name = db_dir + "/" + unique_id;
+  {
+    rocksdb::DB* db_rdonly = nullptr;
+    const rocksdb::Options open_options;
+    vector<rocksdb::ColumnFamilyHandle*> vec_cfh;
+
+    status = rocksdb::DB::OpenForReadOnly(open_options, final_db_name, vec_cfd,
+                                          &vec_cfh, &db_rdonly);
+    // The db exists !
+    if (status.ok()) {
+      ASSERT(&t, db_rdonly);
+      ASSERT(&t, vec_cfh.size() == 2);
+      auto cfh = vec_cfh[1];
+      std::string val;
+      const rocksdb::ReadOptions default_read_options;
+      status = db_rdonly->Get(default_read_options, cfh,
+                              "already_statically_instrumented", &val);
+      ASSERT(&t, status.ok() || status.IsNotFound()) << status.getState();
+      already_statically_instrumented = status.ok();
+      patchdb_map[unique_id] = { .db = unique_ptr<rocksdb::DB>(db_rdonly),
+                                 .already_statically_instrumented =
+                                     already_statically_instrumented };
+      LOG(debug) << fsname << " already_statically_instrumented: "
+                 << already_statically_instrumented;
+      status = db_rdonly->DestroyColumnFamilyHandle(cfh);
+      ASSERT(&t, status.ok()) << status.getState();
+      auto& res = patchdb_map[unique_id];
+      return { .db = *res.db,
+               .already_statically_instrumented =
+                   already_statically_instrumented };
+    }
+  }
+  // the db does not exist, it must be created
+  const string temporary_db_name = db_dir + "/" + unique_id + ".tmp." +
+                                   std::to_string(random()) + "." +
+                                   std::to_string(monotonic_now_sec());
+  {
+    rocksdb::DB* dbp = nullptr;
+    rocksdb::Options open_options;
+    open_options.create_if_missing = true;
+    open_options.create_missing_column_families = true;
+    open_options.compression = rocksdb::kSnappyCompression;
+
+    vector<rocksdb::ColumnFamilyHandle*> vec_cfh;
+
+    rocksdb::Status status = rocksdb::DB::Open(open_options, temporary_db_name,
+                                               vec_cfd, &vec_cfh, &dbp);
+    ASSERT(&t, status.ok()) << status.getState();
+    ASSERT(&t, dbp);
+    ASSERT(&t, vec_cfh.size() == 2);
+    auto cfh = vec_cfh[1];
+    unique_ptr<rocksdb::DB> db(dbp);
+
+    rocksdb::WriteOptions default_write_options_tmp;
+    // Dont need to be able to recover the db:
+    // The db is "atomically created" when the rename() command happens below.
+    // Otherwise the db is never read.
+    default_write_options_tmp.disableWAL = true;
+    const auto default_write_options = default_write_options_tmp;
+
+    const size_t len = syms.size();
+    for (size_t i = 0; i < len; ++i) {
+      if (syms.is_name(i, "__do_software_count")) {
+        LOG(warn) << "`" << fsname
+                  << "` seems to be already (statically) software counter "
+                     "instrumented. It will not be considered for "
+                     "dynamic instrumentation";
+        // TODO: Need to have a better way to abort early than go through all
+        // symbols. However this happens only once, when the db gets created so
+        // it should not be a huge issue.
+        already_statically_instrumented = true;
+        break;
+      }
+    }
+
+    size_t insns_found = 0;
+    if (!already_statically_instrumented) {
+      insns_found = db_write(t, unique_id, fsname, reader, syms, *db,
+                             default_write_options);
+    }
+
+    if (already_statically_instrumented) {
+      // This is a marker rather than a flag, hence empty Slice() is the value
+      // in key-value
+      status = db->Put(default_write_options, cfh,
+                       rocksdb::Slice("already_statically_instrumented"),
+                       rocksdb::Slice());
+      ASSERT(&t, status.ok()) << status.getState();
+    }
+    status = db->DestroyColumnFamilyHandle(cfh);
+    ASSERT(&t, status.ok()) << status.getState();
+    status = db->Close();
+
+    ASSERT(&t, status.ok()) << status.getState();
+    const string dest_path = temporary_db_name + "/filename.txt";
+    string f_endl = fsname + ":";
+    if (already_statically_instrumented) {
+      f_endl += "statically-instrumented\n";
+    } else {
+      f_endl += to_string(insns_found) + "\n";
+    }
+
+    ScopedFd fd(dest_path.c_str(), O_CREAT | O_WRONLY, 0644);
+    const auto ret = write(fd.get(), f_endl.data(), f_endl.size());
+    ASSERT(&t, ret > 0 && size_t(ret) == f_endl.size());
+  }
+  const auto ret = rename(temporary_db_name.c_str(), final_db_name.c_str());
+  if (ret) {
+    LOG(warn) << "Another, probably parallely running instance of rr raced to "
+                 "create `"
+              << final_db_name << "`. Will use that instead. You may delete `"
+              << temporary_db_name << "`";
+  }
+  {
+    rocksdb::DB* db_rdonly_ret = nullptr;
+
+    rocksdb::Options open_options;
+    open_options.comparator = &cmp;
+
+    rocksdb::Status status = rocksdb::DB::OpenForReadOnly(
+        open_options, final_db_name, &db_rdonly_ret);
+
+    ASSERT(&t, status.ok()) << status.getState();
+    ASSERT(&t, db_rdonly_ret);
+    patchdb_map[unique_id] = { .db = unique_ptr<rocksdb::DB>(db_rdonly_ret),
+                               .already_statically_instrumented =
+                                   already_statically_instrumented };
+    auto& res = patchdb_map[unique_id];
+    return { .db = *res.db,
+             .already_statically_instrumented =
+                 already_statically_instrumented };
   }
 }
 

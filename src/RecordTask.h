@@ -632,6 +632,10 @@ public:
   // given address. Returns false if nothing was done.
   bool try_grow_map(remote_ptr<void> addr);
 
+  // Basically contains the initial code of try_grow_map(). Essentially tries
+  // to determine _if_ the map can be grown, doesn't actually do it
+  bool can_grow_map(remote_ptr<void> addr);
+
 private:
   /* Retrieve the tid of this task from the tracee and store it */
   void update_own_namespace_tid();

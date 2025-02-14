@@ -133,23 +133,6 @@ static TraceTaskEvent read_task_trace_event(ReplayTask* t,
   return tte;
 }
 
-
-template <typename Arch>
-static bool syscall_shares_vm(Registers r)
-{
-  switch (r.original_syscallno()) {
-    case Arch::clone:
-      return (CLONE_VM & r.orig_arg1());
-    case Arch::vfork:
-      return true;
-    case Arch::fork:
-      return false;
-    default:
-      FATAL() << "Unknown clone syscall";
-      __builtin_unreachable();
-  }
-}
-
 template <typename Arch> static void prepare_clone(ReplayTask* t) {
   const TraceFrame& trace_frame = t->current_trace_frame();
 
@@ -291,7 +274,7 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
   new_task->set_regs(new_r);
   new_task->canonicalize_regs(new_task->arch());
 
-  if (!syscall_shares_vm<Arch>(r)) {
+  if (!r.syscall_shares_vm()) {
     // It's hard to imagine a scenario in which it would
     // be useful to inherit breakpoints (along with their
     // refcounts) across a non-VM-sharing clone, but for
@@ -300,6 +283,8 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
     new_task->vm()->remove_all_watchpoints();
 
     AutoRemoteSyscalls remote(new_task);
+    // Note that iteration is on Task `t` while any syscalls
+    // via `remote` will be issued on Task `new_task`
     for (const auto& m : t->vm()->maps()) {
       // Recreate any tracee-shared mappings
       if (m.local_addr &&
@@ -481,7 +466,14 @@ static void process_execve(ReplayTask* t, const TraceFrame& trace_frame,
 
     // Now map in all the mappings that we recorded from the real exec.
     for (ssize_t i = 1; i < ssize_t(kms.size()) - 1; ++i) {
-      restore_mapped_region(t, remote, kms[i], datas[i]);
+      if (kms[i].fsname().find(SOFT_COUNT_STUB_TEMP_NAME) != string::npos) {
+        t->vm()->map_software_counter_jump_stub_area(*t, kms[i].start(),
+                                                     kms[i].size());
+        LOG(debug) << "Restored software counter patch stub region: "
+                   << kms[i].start() << "-" << kms[i].end();
+      } else {
+        restore_mapped_region(t, remote, kms[i], datas[i]);
+      }
     }
   }
 
@@ -762,9 +754,12 @@ static void process_mmap(ReplayTask* t, const TraceFrame& trace_frame,
       Session::make_private_shared(remote, t->vm()->mapping_of(addr));
     }
 
+    restore_software_counter_stubs(remote);
+
     // Finally, we finish by emulating the return value.
     remote.regs().set_syscall_result(trace_frame.regs().syscall_result());
   }
+
   // Monkeypatcher can emit data records that need to be applied now
   t->apply_all_data_records_from_trace();
   t->validate_regs();
@@ -873,6 +868,27 @@ void process_grow_map(ReplayTask* t) {
   KernelMapping km = t->trace_reader().read_mapped_region(&data);
   ASSERT(t, km.size());
   restore_mapped_region(t, remote, km, data);
+}
+
+void restore_software_counter_stubs(AutoRemoteSyscalls& remote) {
+  ASSERT(remote.task(), remote.task()->session().is_replaying());
+  ReplayTask& t = *static_cast<ReplayTask*>(remote.task());
+
+  while (true) {
+    TraceReader::MappedData data;
+    bool found = false;
+    KernelMapping km = t.trace_reader().read_mapped_region(&data, &found);
+    if (!found) {
+      break;
+    }
+
+    ASSERT(&t, km.size());
+    ASSERT(&t, km.fsname().find(SOFT_COUNT_STUB_TEMP_NAME) != string::npos);
+
+    t.vm()->map_software_counter_jump_stub_area(t, km.start(), km.size());
+    LOG(debug) << "Restored software counter patch stub region: " << km.start()
+               << "-" << km.end();
+  }
 }
 
 static void process_shmat(ReplayTask* t, const TraceFrame& trace_frame,

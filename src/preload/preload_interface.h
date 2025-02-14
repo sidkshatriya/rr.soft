@@ -88,6 +88,7 @@ static inline const char* extract_file_name(const char* s) {
  * and 'extern "C"' is not compatible with our use of templates below.
  */
 
+#define SOFT_COUNT_STUB_TEMP_NAME "SOFT_COUNT_STUB"
 #define SYSCALLBUF_LIB_FILENAME_BASE "librrpreload"
 #define SYSCALLBUF_LIB_FILENAME SYSCALLBUF_LIB_FILENAME_BASE ".so"
 #define SYSCALLBUF_LIB_FILENAME_PADDED SYSCALLBUF_LIB_FILENAME_BASE ".so:::"
@@ -155,7 +156,7 @@ static inline const char* extract_file_name(const char* s) {
 #else
 #define PRELOAD_THREAD_LOCAL_SCRATCH2_SIZE 0
 #endif
-#define PRELOAD_THREAD_LOCALS_SIZE (144 + PRELOAD_THREAD_LOCAL_SCRATCH2_SIZE)
+#define PRELOAD_THREAD_LOCALS_SIZE (224 + PRELOAD_THREAD_LOCAL_SCRATCH2_SIZE)
 
 #include "rrcalls.h"
 
@@ -227,7 +228,7 @@ struct mprotect_record {
   uint64_t start;
   uint64_t size;
   int32_t prot;
-  int32_t padding;
+  int32_t overlay_exec;
 };
 
 enum ContextSwitchEventStrategy {
@@ -445,6 +446,20 @@ struct preload_thread_locals {
    * only during recording.
    */
   EMBED_STRUCT(rseq_info) rseq;
+
+  // These fields are extra to support software counters
+  int64_t current_ticks;
+  // Don't place any variables between `current_ticks` and `ticks_target`
+  // This MUST appear after `current_ticks`. aarch64 asm assumes this
+  int64_t ticks_target;
+  int64_t accum_ticks;
+  uint32_t ticks_target_was_reached_break;
+  uint32_t in_critical_section;
+  int64_t trace_time;
+  int32_t rec_tid;
+  int32_t _reserved;
+  uint64_t scratch_space[4];
+  // end software counters extra fields
 };
 #if defined(__aarch64__) && (defined(RR_IMPLEMENT_PRELOAD) || \
                              defined(RR_IMPLEMENT_AUDIT))

@@ -171,6 +171,8 @@ public:
    */
   PTData extract_intel_pt_data();
 
+  bool is_software_counter() { return software_counter; }
+
   /**
    * Start the PT copy thread. We need to do this early, before CPU binding
    * has occurred.
@@ -200,7 +202,14 @@ private:
    * in practice during recording, in particular during the
    * async_signal_syscalls tests
    */
-  uint32_t recording_skid_size() { return skid_size() * 5; }
+  uint32_t recording_skid_size() {
+    // Optimization: don't need to vary skid size during recording for software counters
+    if (is_software_counter()) {
+      return skid_size();
+    } else {
+      return skid_size() * 5;
+    }
+  }
 
   /**
    * If `error` is non-null,`*error` will be set to `Error::Transient`
@@ -240,6 +249,7 @@ private:
   Enabled enabled;
   bool opened;
   bool counting;
+  bool software_counter;
 };
 
 } // namespace rr

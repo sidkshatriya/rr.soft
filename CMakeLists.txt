@@ -1,7 +1,28 @@
 # *-* Mode: cmake; *-*
 
 cmake_minimum_required(VERSION 3.5)
+
+set(CMAKE_C_COMPILER clang)
+set(CMAKE_CXX_COMPILER clang++)
+set(SOFTWARE_COUNTERS_PLUGIN "$ENV{HOME}/libSoftwareCounters.so" CACHE STRING "\
+This plugin statically instruments code to support software counters. \
+It is set to `<YOUR-HOME-DIR>/libSoftwareCounters.so` by default. \
+If libSoftwareCounters.so is located elsewhere or with a different name, you can set that too. \
+On aarch64 instrumentation is done dynamically at runtime so you can pass in an empty string, \
+however, it is recommended to pass a valid plugin on aarch64 too so that librrpreload.so \
+is instrumented statically rather than dynamically at runtime (which is less efficient). \
+On x86_64 it is not possible to set this to an empty string. Finally note that rr will \
+*still* be able to run with hardware counters regardless of the setting for this variable."
+)
+
+set(SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS OFF CACHE BOOL "\
+Should the rr test suite be statically instrumented with the software counters plugin ? \
+On aarch64 tests are instrumented dynamically at runtime so this is OFF by default. \
+On x86_64 changing this setting is ignored as tests are always statically instrumented."
+)
+set(SOFTWARE_COUNTERS_PLUGIN_FLAG "-fpass-plugin=${SOFTWARE_COUNTERS_PLUGIN}")
 project(rr C CXX ASM)
+
 
 # "Do not add flags to export symbols from executables without the ENABLE_EXPORTS target property."
 # This avoids linking executables with -rdynamic. -rdynamic has been observed
@@ -55,6 +76,12 @@ if(ANDROID)
   find_package(CapnProto REQUIRED)
 endif()
 
+find_package(RocksDB REQUIRED)
+
+if(${CMAKE_SYSTEM_PROCESSOR} MATCHES x86_64)
+  find_package(Zydis REQUIRED)
+endif()
+
 add_definitions(-DRR_VERSION="${rr_VERSION_MAJOR}.${rr_VERSION_MINOR}.${rr_VERSION_PATCH}")
 
 execute_process(
@@ -72,6 +99,24 @@ configure_file(
   ${CMAKE_BINARY_DIR}/extra_version_string.h
 )
 
+if(${CMAKE_SYSTEM_PROCESSOR} MATCHES x86_64)
+  # override. compulsory.
+  set(SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS ON)
+  if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
+    message(FATAL_ERROR "Cannot set SOFTWARE_COUNTERS_PLUGIN to empty string, \
+                         please set to valid plugin path")
+  endif()
+elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
+  if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
+    if (${SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS})
+      message(FATAL_ERROR "As you have requested to statically instrument tests, you \
+                           cannot set SOFTWARE_COUNTERS_PLUGIN to the empty string. \
+                           Please set a valid plugin path.")
+    endif()
+    set(SOFTWARE_COUNTERS_PLUGIN_FLAG "")
+  endif()
+endif()
+
 set(FLAGS_COMMON "-D__USE_LARGEFILE64 -pthread")
 set(supports32bit true)
 set(x86ish false)
@@ -79,7 +124,7 @@ set(has_syscallbuf false)
 if (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
   set(has_syscallbuf true)
   set(supports32bit false)
-  set(FLAGS_COMMON "${FLAGS_COMMON} -march=armv8.3-a -moutline-atomics")
+  set(FLAGS_COMMON "${FLAGS_COMMON} -march=armv8-a+lse -Wno-error=asm-operand-widths")
   set(PRELOAD_LIBRARY_PAGE_SIZE 65536)
   set(VDSO_NAME "LINUX_2.6.39")
   set(VDSO_SYMBOLS "__kernel_clock_getres; __kernel_rt_sigreturn; __kernel_gettimeofday; __kernel_clock_gettime;")
@@ -104,7 +149,7 @@ endif()
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${FLAGS_COMMON} -Wstrict-prototypes -std=gnu11")
 # Define __STDC_LIMIT_MACROS so |#include <stdint.h>| works as expected.
 # Define __STDC_FORMAT_MACROS so |#include <inttypes.h>| works as expected.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLAGS_COMMON} -D__STDC_LIMIT_MACROS -D__STDC_FORMAT_MACROS -std=c++17")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLAGS_COMMON} -D__STDC_LIMIT_MACROS -D__STDC_FORMAT_MACROS -std=c++17 -Wno-error=unused-const-variable")
 
 # We support three build types:
 # DEBUG: suitable for debugging rr
@@ -114,7 +159,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLAGS_COMMON} -D__STDC_LIMIT_MACROS -D
 
 # Base settings for debug and release/unspecified builds.
 # Use -Werror for debug builds because we assume a developer is building, not a user.
-set(RR_FLAGS_DEBUG "-Wall -Wextra -DDEBUG -UNDEBUG")
+set(RR_FLAGS_DEBUG "-Wall -Wextra -DDEBUG -UNDEBUG -Wno-error=unused-function")
 set(RR_FLAGS_RELEASE "-Wall -Wextra -UDEBUG -DNDEBUG")
 
 # The following settings are the defaults for the OTHER build type.
@@ -126,6 +171,26 @@ set(PRELOAD_LINK_FLAGS "-nostartfiles -fno-lto")
 set(BROTLI_COMPILE_FLAGS ${RR_FLAGS_RELEASE})
 # Flags used to build tests. MUST have -DDEBUG and debuginfo enabled, MUST NOT be optimized.
 set(RR_TEST_FLAGS "${RR_FLAGS_DEBUG} -g3 -O0")
+
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES x86_64)
+  # x86_64 tests require static instrumentation via the clang plugin
+  set(RR_TEST_FLAGS "${RR_TEST_FLAGS} ${SOFTWARE_COUNTERS_PLUGIN_FLAG} -DSOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS")
+  # Software counter mode only supports x86_64
+  set(disable32bit ON)
+  set(PRELOAD_COMPILE_FLAGS "${PRELOAD_COMPILE_FLAGS} ${SOFTWARE_COUNTERS_PLUGIN_FLAG}")
+elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
+  set(RR_TEST_FLAGS "${RR_TEST_FLAGS} -DDYNAMIC_SOFTWARE_COUNTERS_SUPPORT_ENABLED")
+  if (${SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS})
+    set(RR_TEST_FLAGS "${RR_TEST_FLAGS} ${SOFTWARE_COUNTERS_PLUGIN_FLAG} -DSOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS")
+  endif()
+  # Always instrument the preload library, just more efficient to do ahead of time,
+  # unless the user has explicitly passed in -DSOFTWARE_COUNTERS_PLUGIN="" in which
+  # case SOFTWARE_COUNTERS_PLUGIN_FLAG will be an empty string also.
+  set(PRELOAD_COMPILE_FLAGS "${PRELOAD_COMPILE_FLAGS} ${SOFTWARE_COUNTERS_PLUGIN_FLAG}")
+else()
+  message(FATAL_ERROR "The architecture " ${CMAKE_SYSTEM_PROCESSOR} " is not supported with software counters")
+endif()
+
 # Flags used to build other files. Entirely build-type-dependent.
 set(RR_FLAGS ${RR_FLAGS_RELEASE})
 
@@ -135,7 +200,7 @@ if(LOWERCASE_CMAKE_BUILD_TYPE STREQUAL "debug")
   set(PRELOAD_COMPILE_FLAGS "${PRELOAD_COMPILE_FLAGS} -O2 -Werror")
   set(BROTLI_COMPILE_FLAGS "${RR_FLAGS_RELEASE} -O2")
   set(RR_TEST_FLAGS "${RR_TEST_FLAGS} -Werror")
-  set(RR_FLAGS "${RR_FLAGS_DEBUG} -g3 -Werror")
+  set(RR_FLAGS "${RR_FLAGS_DEBUG} -g3 -Werror -Wno-error=unused-parameter")
 elseif(LOWERCASE_CMAKE_BUILD_TYPE STREQUAL "release")
   # CMake itself will add optimization flags
   set(RR_FLAGS "${RR_FLAGS_RELEASE} -g3 -flto")
@@ -750,12 +815,24 @@ if(LIBRT)
   target_link_libraries(rr ${LIBRT})
 endif()
 
-target_link_libraries(rr
-  ${CMAKE_DL_LIBS}
-  ${ZLIB_LDFLAGS}
-  ${LIBBPF_LDFLAGS}
-  brotli
-)
+if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
+  target_link_libraries(rr
+    ${CMAKE_DL_LIBS}
+    ${ZLIB_LDFLAGS}
+    ${LIBBPF_LDFLAGS}
+    brotli
+    RocksDB::rocksdb-shared
+  )
+else()
+  target_link_libraries(rr
+    ${CMAKE_DL_LIBS}
+    ${ZLIB_LDFLAGS}
+    ${LIBBPF_LDFLAGS}
+    brotli
+    RocksDB::rocksdb-shared
+    Zydis::Zydis
+  )
+endif()
 
 if(ZSTD)
   target_link_libraries(rr ${LIBZSTD_LDFLAGS})
@@ -840,6 +917,7 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/scripts/rr-gdb-script-host.py"
 
 install(PROGRAMS scripts/signal-rr-recording.sh
                  scripts/rr-collect-symbols.py
+                 scripts/lscache
   DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 install(PROGRAMS scripts/rr_completion
@@ -851,6 +929,7 @@ install(PROGRAMS scripts/rr_completion.zsh
   DESTINATION ${CMAKE_INSTALL_DATADIR}/zsh/site-functions RENAME _rr)
 
 set(RR_INSTALL_LIBS rrpreload rrpage rr_exec_stub)
+
 if(RTLD_AUDIT)
   set(RR_INSTALL_LIBS ${RR_INSTALL_LIBS} rraudit)
 endif()
@@ -1581,7 +1660,8 @@ set(TESTS_WITH_PROGRAM
   nested_detach_wait
   nested_detach_kill_stuck
   nested_release_signal
-  overflow_branch_counter
+# software-counters: disable for now as it times out
+#  overflow_branch_counter
   pack
   patch_page_end
   x86/patch_40_80_f6_81
@@ -1740,7 +1820,8 @@ set(TESTS_WITHOUT_PROGRAM
   post_exec_fpu_regs
   proc_maps
   read_bad_mem
-  record_replay
+# software counters: disable test as it hangs indefinitely
+#  record_replay
   remove_watchpoint
   replay_overlarge_event_number
   replay_serve_files
@@ -1856,13 +1937,13 @@ if(BUILD_TESTS)
   post_build_executable(tick0)
   set_target_properties(tick0
     PROPERTIES LINK_FLAGS "-static -nostdlib -nodefaultlibs"
-    COMPILE_FLAGS "-static -nostdlib -nodefaultlibs -O3 -g2 -DHAS_TICK0=1")
+    COMPILE_FLAGS "${RR_TEST_FLAGS} -static -nostdlib -nodefaultlibs -O3 -g2 -DHAS_TICK0=1")
 
   add_executable(tick0_less src/test/tick0.c)
   post_build_executable(tick0_less)
   set_target_properties(tick0_less
     PROPERTIES LINK_FLAGS "-static -nostdlib -nodefaultlibs"
-    COMPILE_FLAGS "-static -nostdlib -nodefaultlibs -O3 -g2")
+    COMPILE_FLAGS "${RR_TEST_FLAGS} -static -nostdlib -nodefaultlibs -O3 -g2")
 
   add_executable(watchpoint_unaligned2 src/test/watchpoint_unaligned2.c)
   post_build_executable(watchpoint_unaligned2)

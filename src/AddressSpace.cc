@@ -22,6 +22,7 @@
 #include "Task.h"
 #include "core.h"
 #include "log.h"
+#include "util.h"
 
 using namespace std;
 
@@ -240,6 +241,7 @@ AddressSpace::Mapping::Mapping(const Mapping& other)
     : map(other.map),
       recorded_map(other.recorded_map),
       emu_file(other.emu_file),
+      unique_id(other.unique_id),
       mapped_file_stat(clone_stat(other.mapped_file_stat)),
       local_addr(other.local_addr),
       monitored_shared_memory(other.monitored_shared_memory),
@@ -259,6 +261,7 @@ AddressSpace::Mapping AddressSpace::Mapping::subrange(MemoryRange range,
                                                 range.size())
             : nullptr);
   mapping.flags = flags;
+  mapping.unique_id = unique_id;
   return mapping;
 }
 
@@ -384,6 +387,57 @@ void AddressSpace::map_rr_page(AutoRemoteSyscalls& remote) {
         remote.infallible_syscall(syscall_number_for_brk(arch), 0);
     ASSERT(t, !brk_end.is_null());
   }
+}
+
+bool AddressSpace::map_software_counter_jump_stub_area(
+    Task& t, remote_ptr<void> stub_map_start, size_t stub_map_len) {
+  const int tracee_prot = PROT_EXEC | PROT_READ;
+  const int tracee_flags = MAP_PRIVATE | MAP_FIXED;
+  struct stat fstat;
+  string file_name;
+  {
+    AutoRemoteSyscalls remote(&t);
+
+    auto fd = create_memfd_file(SOFT_COUNT_STUB_TEMP_NAME);
+    ASSERT(&t, fd.is_open());
+    resize_shmem_segment(fd, SC_MMAP_AREA);
+    int child_fd = remote.infallible_send_fd_if_alive(fd);
+    if (child_fd < 0) {
+      LOG(warn) << "Failure in sending fd to tracee for: "
+                << SOFT_COUNT_STUB_TEMP_NAME;
+      return false;
+    }
+
+    remote_ptr<void> ret = remote.infallible_mmap_syscall_if_alive(
+        stub_map_start, stub_map_len, tracee_prot, tracee_flags, child_fd, 0);
+    if (!ret) {
+      LOG(warn) << "Could not create shared software counter stub area. Tracee "
+                   "dying ?";
+      return false;
+    }
+
+    fstat = t.stat_fd(child_fd);
+    file_name = t.file_name_of_fd(child_fd);
+    LOG(debug) << " mmap'ed `" << file_name << "` from " << stub_map_start
+               << "-" << stub_map_start + stub_map_len;
+
+    remote.infallible_close_syscall_if_alive(child_fd);
+  }
+
+  KernelMapping recorded(stub_map_start, stub_map_start + stub_map_len,
+                         file_name, fstat.st_dev, fstat.st_ino, tracee_prot,
+                         tracee_flags, 0);
+  map(&t, stub_map_start, stub_map_len, tracee_prot, tracee_flags, 0, file_name,
+      fstat.st_dev, fstat.st_ino);
+  mapping_flags_of(stub_map_start) |=
+      AddressSpace::Mapping::IS_SOFTWARE_COUNTER_PATCH_STUBS;
+  if (t.session().is_recording()) {
+    RecordTask& rt = *static_cast<RecordTask*>(&t);
+    rt.trace_writer().write_mapped_region(
+        &rt, recorded, fstat, recorded.fsname(), vector<TraceRemoteFd>(),
+        TraceWriter::PATCH_MAPPING);
+  }
+  return true;
 }
 
 vector<uint8_t> AddressSpace::read_rr_page_for_recording(SupportedArch arch) {
@@ -685,6 +739,8 @@ static const char* stringify_flags(int flags) {
       return " [thread_locals]";
     case AddressSpace::Mapping::IS_PATCH_STUBS:
       return " [patch_stubs]";
+    case AddressSpace::Mapping::IS_SOFTWARE_COUNTER_PATCH_STUBS:
+      return " [software_counter_patch_stubs]";
     case AddressSpace::Mapping::IS_RR_PAGE:
       return " [rr_page]";
     case AddressSpace::Mapping::IS_RR_VDSO_PAGE:
@@ -905,10 +961,15 @@ const AddressSpace::Mapping& AddressSpace::mapping_of(
   DEBUG_ASSERT(it->second.map.contains(range));
   return it->second;
 }
-uint32_t& AddressSpace::mapping_flags_of(remote_ptr<void> addr) {
+uint64_t& AddressSpace::mapping_flags_of(remote_ptr<void> addr) {
   return const_cast<AddressSpace::Mapping&>(
              static_cast<const AddressSpace*>(this)->mapping_of(addr))
       .flags;
+}
+std::optional<std::string>& AddressSpace::mapping_unique_id_of(remote_ptr<void> addr) {
+  return const_cast<AddressSpace::Mapping&>(
+             static_cast<const AddressSpace*>(this)->mapping_of(addr))
+      .unique_id;
 }
 
 uint8_t* AddressSpace::local_mapping(remote_ptr<void> addr, size_t size) {
@@ -1415,6 +1476,7 @@ void AddressSpace::unmap_internal(Task* t, remote_ptr<void> addr,
                         m.emu_file, clone_stat(m.mapped_file_stat),
                         m.local_addr, std::move(monitored));
       underflow.flags = m.flags;
+      underflow.unique_id = m.unique_id;
       add_to_map(underflow);
     }
     // If the last segment we unmap overflows the unmap
@@ -1430,6 +1492,7 @@ void AddressSpace::unmap_internal(Task* t, remote_ptr<void> addr,
                                                     m.map.end() - rem.end())
               : nullptr);
       overflow.flags = m.flags;
+      overflow.unique_id = m.unique_id;
       add_to_map(overflow);
     }
 
@@ -1610,6 +1673,26 @@ static bool is_adjacent_mapping(const KernelMapping& mleft,
   if (mleft.end() != mright.start()) {
     return false;
   }
+  // Coalescing is prevented when any mleft and mright flags are different.
+  //
+  // Lets discuss case when IS_SOFTWARE_COUNTER_OVERLAY_EXEC flag is
+  // different. Lets say you have two adjacent mappings: (1) r-x and (2) r--
+  // For just in time dynamic instrumentation the (1) r-x mapping gets
+  // converted to a r-- mapping and then becomes eligible to to be
+  // coalesced with the mapping (2). When a SIGSEGV occurs the interval for
+  // software counter instrumentation (MAX_PROT_INTERVAL) could then go to
+  // within within the purely data section (2). This is may not be a good idea
+  // because currently symbol boundaries *may* not be considered be looked at
+  // while doing software counter instrumentation during just in time dynamic
+  // instrumentation (though they currently are).
+  //
+  // The disadvantage of preventing coalescing is that usually (1) and (2) are
+  // separated anyways by a guard page. So the coaleascing will not happen
+  // anyways due to them not being adjacent. However, if they _were_ adjacent
+  // AddressSpace::protect() would not coalesce them but the linux kernel would.
+  // This would result in rr test suite errors due to the tests being run with
+  // --check-cached-mmaps. The workaround is to run with environment variable
+  // NO_CHECK_CACHED_MMAP=1
   if (((mleft.flags() ^ mright.flags()) & flags_to_check) ||
       mleft.prot() != mright.prot()) {
     return false;
@@ -2065,6 +2148,7 @@ static inline void assert_coalescable(Task* t,
                                       const AddressSpace::Mapping& higher) {
   ASSERT(t, lower.emu_file == higher.emu_file);
   ASSERT(t, lower.flags == higher.flags);
+  ASSERT(t, lower.unique_id == higher.unique_id);
   ASSERT(t,
          (lower.local_addr == 0 && higher.local_addr == 0) ||
              lower.local_addr + lower.map.size() == higher.local_addr);
@@ -2078,7 +2162,7 @@ static bool is_coalescable(const AddressSpace::Mapping& mleft,
                            RESPECT_HEAP)) {
     return false;
   }
-  return mleft.flags == mright.flags;
+  return mleft.flags == mright.flags && mleft.unique_id == mright.unique_id;
 }
 
 void AddressSpace::coalesce_around(Task* t, MemoryMap::iterator it) {
@@ -2115,6 +2199,7 @@ void AddressSpace::coalesce_around(Task* t, MemoryMap::iterator it) {
                 clone_stat(first_kv->second.mapped_file_stat),
                 first_kv->second.local_addr);
   new_m.flags = first_kv->second.flags;
+  new_m.unique_id = first_kv->second.unique_id;
   LOG(debug) << "  coalescing " << new_m.map;
 
   // monitored-memory currently isn't coalescable so we don't need to
@@ -2494,6 +2579,8 @@ remote_ptr<void> AddressSpace::find_free_memory(Task* t,
         end_of_free_space = min(addr_space_end, next->map.start());
       }
       if (current->map.end() + required_space <= end_of_free_space) {
+        LOG(debug) << "found free space (forwards) at: " << current->map.end()
+                   << " after: " << after;
         return current->map.end();
       }
       current = next;
@@ -2504,6 +2591,53 @@ remote_ptr<void> AddressSpace::find_free_memory(Task* t,
     started_from_beginning = true;
     after = addr_space_start;
   }
+}
+
+remote_ptr<void> AddressSpace::find_free_memory_before(Task* t,
+                                                const size_t required_space,
+                                                const remote_ptr<void> before) {
+  remote_ptr<void> addr_space_end = usable_address_space_end(t->arch());
+  ASSERT(t, required_space < UINT64_MAX - addr_space_end.as_int());
+  ASSERT(t, has_mapping(before));
+  KernelMapping before_mapping = mapping_of(before).map;
+
+  remote_ptr<void> found_addr;
+  // Arbitrary minimum starting address of the free memory
+  remote_ptr<void> min_start = 0x10'000;
+  vector<KernelMapping> vec_maps;
+  auto maps = maps_starting_at(remote_ptr<void>());
+  auto it = maps.begin();
+  while (it != maps.end() && it->map.start() <= before_mapping.start()) {
+    vec_maps.push_back(it->map);
+    ++it;
+  }
+  ASSERT(t, vec_maps.size());
+  size_t i = vec_maps.size() - 1;
+  while (true) {
+    auto current_end = vec_maps[i].start();
+    if (min_start + required_space > current_end) {
+      return remote_ptr<void>();
+    }
+    auto proposed_memory_range =
+        MemoryRange(current_end - required_space, required_space);
+    bool has_intersection = false;
+    // if i was set, it is guaranteed that it will be set to a value smaller than current value
+    for (size_t j = 0; j < i; j++) {
+      if (vec_maps[j].intersects(proposed_memory_range)) {
+        i = j;
+        has_intersection = true;
+        break;
+      }
+    }
+    if (!has_intersection) {
+      found_addr = current_end - required_space;
+      LOG(debug) << "found free space (backwards) at: " << found_addr
+                 << " before: " << before;
+      return found_addr;
+    }
+  }
+
+  return remote_ptr<void>();
 }
 
 void AddressSpace::add_stap_semaphore_range(Task* task, MemoryRange range) {

@@ -10,7 +10,7 @@ RECORD_ARGS="--env=_RR_TRACE_DIR=$workdir/inner"
 save_exe "$NEST_EXE"
 save_exe "$SLEEP_EXE"
 touch record.out
-just_record $NEST_EXE-$nonce "$(which rr) record --nested=detach $PWD/$SLEEP_EXE-$nonce" &
+just_record $NEST_EXE-$nonce "$(which rr) record $SOFTWARE_COUNTING_STRATEGY $MAYBE_SOFTWARE_COUNTERS --nested=detach $PWD/$SLEEP_EXE-$nonce" &
 SUB_ID=$!
 
 echo "Waiting for token '$SYNC_TOKEN' from tracee ..."

@@ -1,7 +1,10 @@
 /* -*- Mode: C++; tab-width: 8; c-basic-offset: 2; indent-tabs-mode: nil; -*- */
 
 #include "ElfReader.h"
+#include "ScopedFd.h"
+#include "WaitStatus.h"
 
+#include <csignal>
 #include <elf.h>
 #include <endian.h>
 #include <sys/mman.h>
@@ -13,6 +16,7 @@
 
 #include "log.h"
 #include "util.h"
+#include "Flags.h"
 
 using namespace std;
 
@@ -54,8 +58,8 @@ public:
   virtual const vector<uint8_t>* decompress_section(SectionOffsets offsets) override;
 
 private:
-  const typename Arch::ElfShdr* find_section(const char* n);
   const typename Arch::ElfPhdr* find_programheader(uint32_t pt);
+  const typename Arch::ElfShdr* find_section(const char* n);
 
   const typename Arch::ElfEhdr* elfheader;
   const typename Arch::ElfPhdr* programheader;
@@ -309,10 +313,10 @@ SymbolTable ElfReaderImpl<Arch>::read_symbols(const char* symtab,
     auto& s = symbol_list[i];
     if (s.st_shndx >= sections_size) {
       // Don't leave this entry uninitialized
-      result.symbols[i] = SymbolTable::Symbol(0, 0);
+      result.symbols[i] = SymbolTable::Symbol(0, 0, 0, 0);
       continue;
     }
-    result.symbols[i] = SymbolTable::Symbol(s.st_value, s.st_name);
+    result.symbols[i] = SymbolTable::Symbol(s.st_value, s.st_name, s.st_size, s.st_info);
   }
   return result;
 }
@@ -579,15 +583,30 @@ bool ElfReader::addr_to_offset(uintptr_t addr, uintptr_t& offset) {
 
 bool ElfReader::ok() { return impl().ok(); }
 
-ElfFileReader::ElfFileReader(ScopedFd& fd, SupportedArch arch) : ElfReader(arch) {
+ElfFileReader::ElfFileReader(ScopedFd& fd, SupportedArch arch, bool *ok) : ElfReader(arch) {
   struct stat st;
   if (fstat(fd, &st) < 0) {
-    FATAL() << "Can't stat fd";
+    const auto msg = "Can't stat fd";
+    if (ok) {
+      *ok = false;
+      LOG(warn) << msg;
+      return;
+    }
+    FATAL() << msg;
   }
   if (st.st_size > 0) {
     map = static_cast<uint8_t*>(mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
+    // mmap can fail sometimes
+    // for example, running the `mount_ns_execveat` test with this constructor in infallible mode
+    // (i.e. no `ok` passed in) will result in a FATAL()
     if (map == MAP_FAILED) {
-      FATAL() << "Can't map fd";
+      const auto msg = "Can't map fd";
+      if (ok) {
+        *ok = false;
+        LOG(warn) << msg;
+        return;
+      }
+      FATAL() << msg;
     }
   }
   size = st.st_size;
@@ -599,9 +618,122 @@ ElfFileReader::~ElfFileReader() {
   }
 }
 
+static void timeout_message(sigval_t val) {
+  if (Flags::get().suppress_environment_warnings) {
+    return;
+  }
+  auto fsname = static_cast<const char*>(val.sival_ptr);
+  fprintf(stderr, "=== Please wait, it might take some more time to fetch "
+                  "debugging information for %s (it will be cached for fast access in "
+                  "the future)...\n", fsname);
+}
+
+static ScopedFd debuginfod_find(const std::string& fsname,
+                                const std::string& buildid) {
+  std::string command("debuginfod-find debuginfo ");
+  for (char c : buildid) {
+    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+      continue;
+    } else {
+      LOG(error) << "Malformed build id: `" << buildid << "` for: " << fsname;
+      return ScopedFd();
+    }
+  }
+  command = command + buildid + " 2>&1";
+  std::string result;
+  std::string full_response;
+  result.reserve(100);
+  full_response.reserve(100);
+  LOG(info) << "Fetching debuginfo for `" << fsname
+            << "` (this may take some time, but will store to a cache so that "
+               "it is fast subsequently...)";
+  struct sigevent sig_event{};
+  sig_event.sigev_notify = SIGEV_THREAD;
+  sig_event.sigev_value.sival_ptr = (void*)fsname.c_str();
+  sig_event.sigev_notify_function = timeout_message;
+
+  timer_t timer_id{};
+  if (timer_create(CLOCK_MONOTONIC, &sig_event, &timer_id)) {
+    FATAL() << "Failure in timer_create";
+  }
+  // 8 second timeout
+  struct itimerspec timeout = { { 0, 0 }, { 8, 0 } };
+  // all zeros implies disabling the timeout
+  struct itimerspec disable_timeout{};
+  if (timer_settime(timer_id, 0, &timeout, nullptr)) {
+    FATAL() << "Failure in timer_settime: could not set timeout";
+  }
+  FILE* f = popen(command.c_str(), "r");
+  bool line_encountered = false;
+  while (1) {
+    int ch = fgetc(f);
+    if (ch < 0) {
+      break;
+    }
+    if (ch == '\n') {
+      line_encountered = true;
+    }
+    if (!line_encountered) {
+      result.push_back(ch);
+    }
+    full_response.push_back(ch);
+  }
+  auto error = WaitStatus(pclose(f));
+  if (timer_settime(timer_id, 0, &disable_timeout, nullptr)) {
+    FATAL() << "Failure in timer_settime: could not disable timeout";
+  }
+  if (error.exit_code() == 0) {
+    ScopedFd debug_fd(result.c_str(), O_RDONLY);
+    if (debug_fd.is_open()) {
+      LOG(info) << "  found debuginfo: `" << result << "` for: `" << fsname
+                << "`";
+    } else {
+      LOG(info) << "  could not open: `" << result << "`";
+    }
+    return debug_fd;
+  } else {
+    LOG(info) << "  command response was: `" << full_response << "`";
+    LOG(info) << "  failed command returned with exit code: "
+              << error.exit_code();
+    return ScopedFd();
+  }
+}
+
+static ScopedFd debuginfo_from_buildid(const std::string& elf_file_name,
+                                       const std::string& buildid) {
+  auto buildid_path1 = std::string(getenv("HOME")) +
+                       "/.cache/debuginfod_client/" + buildid + "/debuginfo";
+  ScopedFd debug_fd1(buildid_path1.c_str(), O_RDONLY);
+  if (!debug_fd1.is_open() && buildid.size() > 2) {
+    auto buildid_path2 = std::string("/usr/lib/debug/.build-id/") +
+                         buildid.substr(0, 2) + "/" + buildid.substr(2) +
+                         ".debug";
+    ScopedFd debug_fd2(buildid_path2.c_str(), O_RDONLY);
+    if (debug_fd2.is_open()) {
+      LOG(info) << "Found debuginfo: `" << buildid_path2 << "` for: `"
+                << elf_file_name << "`";
+      return debug_fd2;
+    } else {
+      return debuginfod_find(elf_file_name, buildid);
+    }
+  } else {
+    LOG(info) << "Found debuginfo: `" << buildid_path1 << "` for: `"
+              << elf_file_name << "`";
+    return debug_fd1;
+  }
+}
+
 ScopedFd ElfFileReader::open_debug_file(const std::string& elf_file_name) {
   if (elf_file_name.empty() || elf_file_name[0] != '/') {
     return ScopedFd();
+  }
+
+  std::string buildid = read_buildid();
+  if (buildid.size()) {
+    ScopedFd debug_fd = debuginfo_from_buildid(elf_file_name, buildid);
+    if (debug_fd.is_open()) {
+      return debug_fd;
+    }
   }
 
   Debuglink debuglink = read_debuglink();
@@ -636,6 +768,8 @@ ScopedFd ElfFileReader::open_debug_file(const std::string& elf_file_name) {
   }
 
   if ((crc ^ 0xffffffff) == debuglink.crc) {
+    LOG(info) << "Found debuginfo: `" << debug_path << "` for: `"
+              << elf_file_name << "`";
     return debug_fd;
   }
   return ScopedFd();

@@ -141,6 +141,11 @@ public:
 
   ReplayTask* as_replay();
 
+  // If task does not use software counters, always returns false
+  // Otherwise returns true only if execution was interrupted when
+  // software counters were being updated
+  bool is_in_static_software_counter_critical_section();
+
   /**
    * Ptrace-detach the task.
    */
@@ -1142,6 +1147,12 @@ public:
   // (used to avoid double recording on unexpected exit)
   bool last_syscall_entry_recorded;
 
+  // Assumes that Task t is doing software counting
+  void reset_soft_counter(int64_t tick_period);
+
+  // Assumes that Task t is doing software counting
+  int64_t read_soft_counter();
+
   /*
    * Called before the scheduler resumes a task to check if the task's address
    * space has any leftover syscallbufs from dead processes which shared the
@@ -1149,9 +1160,25 @@ public:
    */
   void unmap_dead_syscallbufs_if_required();
 
+  bool is_in_dynamic_software_counter_patch_stub(remote_code_ptr ip);
 protected:
+  // Returns true if a move out of critical section did take place
+  bool maybe_move_out_of_static_software_counter_critical_section();
+  template <typename Arch>
+  friend bool maybe_move_out_of_static_software_counter_critical_section_arch(Task &t);
+
+  bool dynamic_software_counter_fired();
+
+  bool maybe_move_out_of_dynamic_software_counter_stub();
+  template <typename Arch>
+  friend bool maybe_move_out_of_dynamic_software_counter_stub_arch(Task& t);
+
+  bool must_avoid_move_out_of_dynamic_software_counter_stub(remote_ptr<void> faulting_sp);
+
   Task(Session& session, pid_t tid, pid_t rec_tid, uint32_t serial,
        SupportedArch a);
+
+  bool did_static_software_counter_fire(WaitStatus status);
 
   enum CloneReason {
     // Cloning a task in the same session due to tracee fork()/vfork()/clone()

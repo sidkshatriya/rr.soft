@@ -37,6 +37,7 @@ share/
 libbrotli*
 extra_version_string.h
 git_revision.h
+**/.gdb_history
 third-party/zen-pmu-workaround/.*
 third-party/zen-pmu-workaround/*.ko
 third-party/zen-pmu-workaround/*.o

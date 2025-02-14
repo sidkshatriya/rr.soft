@@ -75,6 +75,7 @@ void print_global_options(FILE* out) {
       "                             like good ideas, for example launching an\n"
       "                             interactive emergency debugger if stderr\n"
       "                             isn't a tty.\n"
+      "  -W --software-counters     Use software counters\n"
       "  -E, --fatal-errors         any warning or error that is printed is\n"
       "                             treated as fatal\n"
       "  -M, --mark-stdio           mark stdio writes with [rr <PID> <EV>]\n"
@@ -140,6 +141,7 @@ bool parse_global_option(std::vector<std::string>& args) {
     { 'N', "version", NO_PARAMETER },
     { 'S', "suppress-environment-warnings", NO_PARAMETER },
     { 'T', "dump-at", HAS_PARAMETER },
+    { 'W', "software-counters", NO_PARAMETER },
   };
 
   ParsedOption opt;
@@ -169,6 +171,15 @@ bool parse_global_option(std::vector<std::string>& args) {
       break;
     case 'A':
       flags.forced_uarch = opt.value;
+      break;
+    case 'W':
+#if defined(__x86_64__)
+      LOG(info) << "Using software counters mode";
+      flags.software_counters = true;
+      flags.forced_uarch = "Software";
+#else
+      FATAL() << "Software counters not supported on this architecture";
+#endif
       break;
     case 'C':
       if (opt.value == "on-syscalls") {
@@ -216,6 +227,11 @@ bool parse_global_option(std::vector<std::string>& args) {
     default:
       DEBUG_ASSERT(0 && "Invalid flag");
   }
+
+  if (flags.software_counters && flags.forced_uarch != "Software") {
+      CLEAN_FATAL() << "Can't force a microarchitecture if using software counters";
+  }
+
   return true;
 }
 

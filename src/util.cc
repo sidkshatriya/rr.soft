@@ -515,6 +515,22 @@ void checksum_process_memory(RecordTask* t, FrameTime global_time) {
       normalize_syscallbuf(t, mem);
     }
 
+    if (m.flags & AddressSpace::Mapping::IS_THREAD_LOCALS && t->hpc.is_software_counter()) {
+#if defined(__x86_64__) || defined(__i386__)
+      ASSERT(t, t->arch() == SupportedArch::x86_64);
+      auto p = static_cast<::preload_thread_locals<X64Arch>*>((void *)mem.data());
+#elif __aarch64__
+      auto p = static_cast<::preload_thread_locals<ARM64Arch>*>((void *)mem.data());
+#endif
+      p->current_ticks = 0;
+      p->ticks_target = 0;
+      p->accum_ticks = 0;
+      p->trace_time = 0;
+      p->rec_tid = 0;
+      p->ticks_target_was_reached_break = 0;
+      p->in_critical_section = 0;
+    }
+
     uint32_t checksum = compute_checksum(mem.data(), mem.size());
     fprintf(checksums_file, "(%x) %s\n", checksum, raw_map_line.c_str());
   }
@@ -573,6 +589,22 @@ void validate_process_memory(ReplayTask* t, FrameTime global_time) {
 
     if (m.flags & AddressSpace::Mapping::IS_SYSCALLBUF) {
       normalize_syscallbuf(t, mem);
+    }
+
+    if (m.flags & AddressSpace::Mapping::IS_THREAD_LOCALS && t->hpc.is_software_counter()) {
+#if defined(__x86_64__) || defined(__i386__)
+      ASSERT(t, t->arch() == SupportedArch::x86_64);
+      auto p = static_cast<::preload_thread_locals<X64Arch>*>((void *)mem.data());
+#elif __aarch64__
+      auto p = static_cast<::preload_thread_locals<ARM64Arch>*>((void *)mem.data());
+#endif
+      p->current_ticks = 0;
+      p->ticks_target = 0;
+      p->accum_ticks = 0;
+      p->trace_time = 0;
+      p->rec_tid = 0;
+      p->ticks_target_was_reached_break = 0;
+      p->in_critical_section = 0;
     }
 
     uint32_t our_checksum = compute_checksum(mem.data(), mem.size());
@@ -1866,7 +1898,7 @@ TempFile create_temporary_file(const char* pattern) {
   return result;
 }
 
-static ScopedFd create_memfd_file(const string &real_name) {
+ScopedFd create_memfd_file(const string &real_name) {
   ScopedFd fd(syscall(SYS_memfd_create, real_name.c_str(), 0));
   return fd;
 }
@@ -2648,6 +2680,62 @@ static optional<int> init_read_perf_event_paranoid() {
 optional<int> read_perf_event_paranoid() {
   static optional<int> value = init_read_perf_event_paranoid();
   return value;
+}
+
+bool dir_exists(const std::string& dir) {
+  struct stat dummy;
+  return !dir.empty() && stat(dir.c_str(), &dummy) == 0;
+}
+
+// Returns empty string on failure
+std::string sha256sum(const std::string& fsname) {
+  std::string command("sha256sum ");
+  string fsname_esc;
+  fsname_esc.push_back('\'');
+  for (char c : fsname) {
+    if (c == '\'') {
+      fsname_esc.push_back('\\');
+      fsname_esc.push_back('\'');
+    } else if (c == '\\') {
+      fsname_esc.push_back('\\');
+      fsname_esc.push_back('\\');
+    } else {
+      fsname_esc.push_back(c);
+    }
+  }
+  fsname_esc.push_back('\'');
+  command += fsname_esc + " 2>&1";
+  std::string result;
+  std::string full_response;
+  result.reserve(100);
+  full_response.reserve(100);
+  LOG(info) << "Issuing command `" << command << "`"
+            << "  for `" << fsname << "`";
+  FILE* f = popen(command.c_str(), "r");
+  bool space_encountered = false;
+  while (1) {
+    int ch = fgetc(f);
+    if (ch < 0) {
+      break;
+    }
+    if (ch == ' ') {
+      space_encountered = true;
+    }
+    // sha256sum result has a space after the shasum
+    if (!space_encountered) {
+      result.push_back(ch);
+    }
+    full_response.push_back(ch);
+  }
+  auto error = WaitStatus(pclose(f));
+  if (error.exit_code() == 0) {
+    return result;
+  } else {
+    LOG(error) << "`" << command << "` response was: `" << full_response << "`";
+    LOG(error) << "  failed command returned with exit code: "
+               << error.exit_code();
+    return string();
+  }
 }
 
 bool virtual_address_size_supported(uint8_t bits) {

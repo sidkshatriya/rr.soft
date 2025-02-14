@@ -23,10 +23,14 @@ namespace rr {
 class ReplayTask;
 
 const uintptr_t X86_RESERVED_FLAG = 1 << 1;
+const uintptr_t X86_CF_FLAG = 1 << 0;
+const uintptr_t X86_PF_FLAG = 1 << 2;
 const uintptr_t X86_ZF_FLAG = 1 << 6;
+const uintptr_t X86_SF_FLAG = 1 << 7;
 const uintptr_t X86_TF_FLAG = 1 << 8;
 const uintptr_t X86_IF_FLAG = 1 << 9;
 const uintptr_t X86_DF_FLAG = 1 << 10;
+const uintptr_t X86_OF_FLAG = 1 << 11;
 const uintptr_t X86_RF_FLAG = 1 << 16;
 const uintptr_t X86_ID_FLAG = 1 << 21;
 
@@ -307,6 +311,8 @@ public:
    */
   bool syscall_may_restart() const;
 
+  bool syscall_shares_vm() const;
+
   // Some X86-specific stuff follows. Use of these accessors should be guarded
   // by an architecture test.
   /**
@@ -343,6 +349,11 @@ public:
   bool set_r11(uintptr_t value) {
     DEBUG_ASSERT(arch() == x86_64);
     RR_UPDATE_CHECK(u.x64regs.r11, value);
+  }
+
+  uintptr_t r11() const {
+    DEBUG_ASSERT(arch() == x86_64);
+    return u.x64regs.r11;
   }
 
   uintptr_t di() const { return RR_GET_REG_X86(edi, rdi); }

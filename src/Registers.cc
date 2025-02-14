@@ -723,4 +723,24 @@ void Registers::emulate_syscall_entry() {
   }
 }
 
+template <typename Arch>
+static bool syscall_shares_vm_arch(const Registers& r)
+{
+  switch (r.original_syscallno()) {
+    case Arch::clone:
+      return (CLONE_VM & r.orig_arg1());
+    case Arch::vfork:
+      return true;
+    case Arch::fork:
+      return false;
+    default:
+      FATAL() << "Unknown clone syscall";
+      __builtin_unreachable();
+  }
+}
+
+bool Registers::syscall_shares_vm() const {
+  RR_ARCH_FUNCTION(syscall_shares_vm_arch, arch(), *this);
+}
+
 } // namespace rr

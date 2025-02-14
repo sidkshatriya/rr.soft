@@ -558,13 +558,14 @@ const AddressSpace::Mapping Session::recreate_shared_mmap(
   strncpy(name, m.map.fsname().c_str(), sizeof(name) - 1);
   name[sizeof(name) - 1] = 0;
   uint32_t flags = m.flags;
+  auto unique_id = m.unique_id;
   size_t size = m.map.size();
   void* preserved_data = preserve == PRESERVE_CONTENTS ? m.local_addr : nullptr;
   void* remote_task_local_mapping = nullptr;
 
   {
     // Note that Mapping `m` may correspond to a Mapping from a different Task
-    // than the `maybe_detach_mapping`. See replay_syscall.cc prepare_clone()
+    // than the `remote_task_mapping`. See replay_syscall.cc prepare_clone()
     // for an example.
     auto remote_task_mapping = remote.task()->vm()->mapping_of(m.map.start());
 
@@ -587,6 +588,7 @@ const AddressSpace::Mapping Session::recreate_shared_mmap(
     remote.task()->vm()->mapping_flags_of(new_addr) = flags;
     new_map = remote.task()->vm()->mapping_of(new_addr);
     if (preserved_data) {
+      remote.task()->vm()->mapping_unique_id_of(new_addr) = unique_id;
       memcpy(new_map.local_addr, preserved_data, size);
     }
   }

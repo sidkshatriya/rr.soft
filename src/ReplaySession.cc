@@ -1,5 +1,6 @@
 /* -*- Mode: C++; tab-width: 8; c-basic-offset: 2; indent-tabs-mode: nil; -*- */
 
+#include "Event.h"
 #define USE_BREAKPOINT_TARGET 1
 
 #include "ReplaySession.h"
@@ -1925,6 +1926,14 @@ ReplayTask* ReplaySession::setup_replay_one_trace_frame(ReplayTask* t) {
       break;
     case EV_GROW_MAP:
       process_grow_map(t);
+      current_step.action = TSTEP_RETIRE;
+      break;
+    case EV_OVERLAY_PROTECT:
+      {
+        AutoRemoteSyscalls remote(t);
+        restore_software_counter_stubs(remote);
+      }
+      t->apply_all_data_records_from_trace();
       current_step.action = TSTEP_RETIRE;
       break;
     case EV_SIGNAL: {

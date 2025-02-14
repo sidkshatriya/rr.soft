@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <rocksdb/db.h>
+
 #include "Scheduler.h"
 #include "SeccompFilterRewriter.h"
 #include "Session.h"
@@ -14,6 +16,24 @@
 #include "WaitStatus.h"
 
 namespace rr {
+
+enum SC_Strategy {
+  // Mostly do just in time software counting dynamic instrumentation
+  // However for some cases (e.g. libc.so) do the dynamic instrumentation in one-go
+  // Usually faster than SCS_NEVER_JII
+  SCS_BASIC,
+  // Never do just in time software counting dynamic instrumentation
+  // i.e. do all the dynamic instrumentation on the map after a mmap / execve
+  // Usually the slowest strategy
+  SCS_NEVER_JII,
+  // Very minimal instrumentation, fastest
+  SCS_MINIMAL,
+  // Always do just in time software counting dynamic instrumentation
+  // i.e. remove PROT_EXEC from the map, wait for a SIGSEGV and then add back in PROT_EXEC
+  // around the memory location that triggered the SIGSEGV.
+  // Usually the fastest strategy
+  SCS_ALWAYS_JII,
+};
 
 class RecordTask;
 
@@ -165,6 +185,12 @@ public:
     trace_out.set_chaos_mode(enable_chaos);
   }
   bool enable_chaos() const { return enable_chaos_; }
+  void set_software_counting_strategy(SC_Strategy strategy) {
+    software_counting_strategy_ = strategy;
+  }
+  SC_Strategy software_counting_strategy() const {
+    return software_counting_strategy_;
+  }
 
   void set_num_cores(int num_cores) {
     scheduler().set_num_cores(num_cores);
@@ -211,7 +237,25 @@ public:
 
   void on_destroy_record_task(RecordTask* t);
 
+  struct cached_data {
+    rocksdb::DB& db;
+    bool already_statically_instrumented = false;
+  };
+  cached_data get_or_create_db_of_patch_locations(const RecordTask& t,
+                                                  const std::string& fsname,
+                                                  ElfFileReader& reader,
+                                                  SymbolTable& syms,
+                                                  const std::string& unique_id);
+  std::optional<cached_data> get_db_of_patch_locations(
+      const std::string& unique_id);
+
+  struct stored_data {
+    std::unique_ptr<rocksdb::DB> db;
+    bool already_statically_instrumented = false;
+  };
+  std::map<std::string, stored_data> patchdb_map;
 private:
+
   RecordSession(const std::string& exe_path,
                 const std::vector<std::string>& argv,
                 const std::vector<std::string>& envp,
@@ -290,6 +334,7 @@ private:
   bool use_audit_;
   bool unmap_vdso_;
   bool check_outside_mmaps_;
+  SC_Strategy software_counting_strategy_ = SCS_ALWAYS_JII;
 };
 
 } // namespace rr

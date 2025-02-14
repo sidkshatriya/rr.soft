@@ -13,6 +13,7 @@
 #include <sys/user.h>
 #include <syscall.h>
 
+#include "AddressSpace.h"
 #include "preload/preload_interface.h"
 
 #include "AutoRemoteSyscalls.h"
@@ -172,6 +173,94 @@ static bool try_grow_map(RecordTask* t, siginfo_t* si) {
     t->push_event(Event::noop());
     return true;
   }
+  return false;
+}
+
+const uint64_t MAX_PROT_INTERVAL = 16*1024;
+
+static bool try_overlay_permission(RecordTask& t, siginfo_t* si) {
+  ASSERT(&t, si->si_signo == SIGSEGV);
+  if (!t.hpc.is_software_counter()) {
+    return false;
+  }
+
+  // Use kernel_abi to avoid odd inconsistencies between distros
+  const auto arch_si = reinterpret_cast<NativeArch::siginfo_t*>(si);
+  const auto addr_page_raw =
+      (arch_si->_sifields._sigfault.si_addr_.rptr().as_int() / page_size()) *
+      page_size();
+  if (arch_si->si_code != SEGV_ACCERR || !t.vm()->has_mapping(addr_page_raw)) {
+    return false;
+  }
+
+  auto map = t.vm()->mapping_of(addr_page_raw);
+  bool oexec = t.vm()->mapping_flags_of(addr_page_raw) &
+               AddressSpace::Mapping::IS_SOFTWARE_COUNTER_OVERLAY_EXEC;
+  if (oexec) {
+    auto maybe_unique_id = t.vm()->mapping_unique_id_of(addr_page_raw);
+    LOG(debug) << "unique id of `" << map.map.fsname() << "` is: "
+               << (maybe_unique_id ? *maybe_unique_id : "`-- not found --`");
+    auto prot = map.map.prot();
+    if (oexec && !(prot & PROT_EXEC)) {
+      uint64_t min_start = map.map.start().as_int();
+      if (addr_page_raw - min_start > MAX_PROT_INTERVAL) {
+        min_start = addr_page_raw - MAX_PROT_INTERVAL;
+      }
+      uint64_t max_end = map.map.end().as_int();
+      if (max_end - addr_page_raw > MAX_PROT_INTERVAL) {
+        max_end = addr_page_raw + MAX_PROT_INTERVAL;
+      }
+      LOG(debug) << "try_overlay_permission: mprotect `" << map.map.fsname() << "` "
+                 << HEX(min_start) << "-"
+                 << HEX(max_end)
+                 << " with: " << prot_flags_string(prot | PROT_EXEC);
+      size_t siz = max_end - min_start;
+      {
+        AutoRemoteSyscalls remote(&t,
+                                  AutoRemoteSyscalls::DISABLE_MEMORY_PARAMS);
+        int mprotect_syscallno = syscall_number_for_mprotect(t.arch());
+        int ret = remote.infallible_syscall_if_alive(
+            mprotect_syscallno, min_start, siz, prot | PROT_EXEC);
+        if (ret == -ESRCH) {
+          LOG(warn) << "try_overlay_permission: Could not perform syscall "
+                       "mprotect in tracee. Tracee dying ?";
+          return false;
+        }
+      }
+      t.vm()->protect(&t, min_start, siz, prot | PROT_EXEC);
+      const auto& new_mapping = t.vm()->mapping_of(min_start);
+      auto& new_mapping_flags = t.vm()->mapping_flags_of(min_start);
+      new_mapping_flags &=
+          ~AddressSpace::Mapping::IS_SOFTWARE_COUNTER_OVERLAY_EXEC;
+      if (maybe_unique_id) {
+        std::optional<RecordSession::cached_data> mc =
+            t.session().get_db_of_patch_locations(*maybe_unique_id);
+        if (mc) {
+          t.vm()->monkeypatcher().instrument_with_software_counters(
+              t, min_start, min_start + siz,
+              new_mapping.map, mc->db);
+          LOG(debug) << "Completed software counter instrumentation after "
+                        "SIGSEGV for `"
+                     << map.map.fsname() << "` from: " << HEX(min_start) << "-"
+                     << HEX(max_end);
+        }
+      }
+
+      t.session().accumulate_sc_jii_SIGSEGV();
+      struct mprotect_record rec{ .start = min_start,
+                                  .size = siz,
+                                  .prot = prot | PROT_EXEC,
+                                  .overlay_exec = 0 };
+      Event ev = Event(rec);
+      t.record_event(ev, RecordTask::DONT_FLUSH_SYSCALLBUF);
+      t.push_event(Event::noop());
+      return true;
+    }
+  }
+  LOG(debug)
+      << "try_overlay_permission: No overlay exec exists for the map named `"
+      << map.map.fsname() << "` from: " << map.map.start() << "-"
+      << map.map.end();
   return false;
 }
 
@@ -688,7 +777,8 @@ SignalHandled handle_signal(RecordTask* t, siginfo_t* si,
     // signal was generated for rr's purposes, we need to restore the signal
     // state ourselves.
     if (sig == SIGSEGV &&
-        (try_handle_trapped_instruction(t, si) || try_grow_map(t, si))) {
+        (try_handle_trapped_instruction(t, si) || try_grow_map(t, si) ||
+         try_overlay_permission(*t, si))) {
       if (signal_was_blocked || t->is_sig_ignored(sig)) {
         restore_signal_state(t, sig, signal_was_blocked);
       }

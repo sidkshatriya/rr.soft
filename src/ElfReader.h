@@ -27,14 +27,25 @@ public:
     return offset < strtab.size() && strcmp(&strtab[offset], name) == 0;
   }
   uintptr_t addr(size_t i) const { return symbols[i].addr; }
+  size_t symbol_size(size_t i) const { return symbols[i].symbol_size; }
+  uint8_t symbol_type(size_t i) const { return symbols[i].symbol_type; }
+  uint8_t symbol_bind(size_t i) const { return symbols[i].symbol_bind; }
   size_t size() const { return symbols.size(); }
 
   struct Symbol {
-    Symbol(uintptr_t addr, size_t name_index)
-        : addr(addr), name_index(name_index) {}
+    Symbol(uintptr_t addr, size_t name_index, size_t symbol_size,
+           uint8_t symbol_info)
+        : addr(addr),
+          name_index(name_index),
+          symbol_size(symbol_size),
+          symbol_type(symbol_info & 0xf),
+          symbol_bind(symbol_info >> 4) {}
     Symbol() {}
     uintptr_t addr;
     size_t name_index;
+    size_t symbol_size;
+    uint8_t symbol_type;
+    uint8_t symbol_bind;
   };
   std::vector<Symbol> symbols;
   // Last character is always null  map = static_cast<uint8_t*>(fd);
@@ -121,7 +132,7 @@ protected:
 
 class ElfFileReader : public ElfReader {
 public:
-  ElfFileReader(ScopedFd& fd, SupportedArch arch);
+  ElfFileReader(ScopedFd& fd, SupportedArch arch, bool *ok = nullptr);
   ElfFileReader(ScopedFd& fd) : ElfFileReader(fd, identify_arch(fd)) {}
   ~ElfFileReader();
   // Finds and opens the debug file corresponding to this reader.

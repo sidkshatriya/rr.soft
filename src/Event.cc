@@ -27,6 +27,9 @@ Event::Event(const Event& o) : event_type(o.event_type) {
     case EV_SCHED:
       new (&Sched()) SchedEvent(o.Sched());
       return;
+    case EV_OVERLAY_PROTECT:
+      new (&OverlayProtect()) OverlayProtectEvent(o.OverlayProtect());
+      return;
     case EV_SIGNAL:
     case EV_SIGNAL_DELIVERY:
     case EV_SIGNAL_HANDLER:
@@ -126,6 +129,7 @@ bool Event::has_ticks_slop() const {
     case EV_SYSCALLBUF_RESET:
     case EV_DESCHED:
     case EV_GROW_MAP:
+    case EV_OVERLAY_PROTECT:
       return true;
     default:
       return false;
@@ -213,6 +217,7 @@ std::string Event::type_name() const {
       CASE(SYSCALLBUF_RESET);
       CASE(PATCH_SYSCALL);
       CASE(GROW_MAP);
+      CASE(OVERLAY_PROTECT);
       CASE(DESCHED);
       CASE(SIGNAL);
       CASE(SIGNAL_DELIVERY);

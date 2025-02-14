@@ -7,17 +7,38 @@
 #include <unordered_set>
 #include <vector>
 
+#include <rocksdb/db.h>
+#include <rocksdb/comparator.h>
+
+#include "ElfReader.h"
 #include "preload/preload_interface.h"
 
 #include "remote_code_ptr.h"
 #include "remote_ptr.h"
+#include "util.h"
 
 namespace rr {
+
+const size_t SC_MMAP_AREA = 0x20000;
+// Needs to be an exact multiple of 0x1000 (smallest page size on aarch64/x86)
+static_assert(SC_MMAP_AREA % 0x1000 == 0);
 
 class ElfReader;
 class RecordTask;
 class ScopedFd;
 class Task;
+
+enum PatchCategory: uint8_t {
+  WIDE_COND_BRANCH
+};
+struct __attribute__((packed)) PatchData {
+  uint64_t elf_addr = 0;
+  PatchCategory category = WIDE_COND_BRANCH;
+  uint8_t len = 0;
+  // delta from the instruction start rather than next instruction start
+  int64_t actual_delta = 0;
+  uint8_t data[];
+};
 
 /**
  * A class encapsulating patching state. There is one instance of this
@@ -120,15 +141,35 @@ public:
   void patch_after_mmap(RecordTask* t, remote_ptr<void> start, size_t size,
                         size_t offset_bytes, int child_fd, MmapMode mode);
 
-  /**
-   * The list of pages we've allocated to hold our extended jumps.
-   */
   struct ExtendedJumpPage {
     ExtendedJumpPage(remote_ptr<uint8_t> addr) : addr(addr), allocated(0) {}
     remote_ptr<uint8_t> addr;
     size_t allocated;
   };
+  /**
+   * The list of pages we've allocated to hold our extended jumps.
+   */
   std::vector<ExtendedJumpPage> extended_jump_pages;
+
+  void instrument_with_software_counters(
+      RecordTask& t, const remote_ptr<void> instrumentation_addr_start,
+      const remote_ptr<void> instrumentation_addr_end, const KernelMapping& map,
+      rocksdb::DB& db);
+
+  void software_counter_instrument_after_mmap(
+      RecordTask& t, const remote_ptr<void> start_region,
+      const size_t size_region, const size_t offset_bytes, int child_fd,
+      const MmapMode mode);
+
+  struct JumpStubArea {
+    JumpStubArea(remote_ptr<uint8_t> start_addr, size_t jump_area_size)
+        : jump_area_start(start_addr), jump_area_size(jump_area_size), allocated_bytes(0) {}
+    const remote_ptr<uint8_t> jump_area_start;
+    const size_t jump_area_size;
+    size_t allocated_bytes;
+  };
+  std::vector<JumpStubArea> software_counter_stub_areas;
+  size_t last_used_software_counter_stub_area = 0;
 
   bool is_jump_stub_instruction(remote_code_ptr p, bool include_safearea);
   // Return the breakpoint instruction (i.e. the last branch back to caller)

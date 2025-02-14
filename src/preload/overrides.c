@@ -18,7 +18,6 @@
 #include "syscallbuf.h"
 
 #define PTHREAD_MUTEX_PRIO_INHERIT_NP 32
-
 #define DOUBLE_UNDERSCORE_PTHREAD_LOCK_AVAILABLE 1
 #ifdef __GLIBC_PREREQ
 #if __GLIBC_PREREQ(2, 34)

@@ -103,7 +103,22 @@ function usage {
     echo Usage: "util.sh TESTNAME [LIB_ARG] [OBJDIR]"
 }
 
-GLOBAL_OPTIONS="--suppress-environment-warnings --fatal-errors"
+if [[ ! -z "$SOFTWARE_COUNTING_STRATEGY" ]]; then
+    SOFTWARE_COUNTING_STRATEGY="--scs=$SOFTWARE_COUNTING_STRATEGY"
+fi
+
+MAYBE_SOFTWARE_COUNTERS=""
+if [[ -z "$TEST_HARDWARE_PMU" ]]; then
+    MAYBE_SOFTWARE_COUNTERS="--software-counters"
+fi
+GLOBAL_OPTIONS="$MAYBE_SOFTWARE_COUNTERS --suppress-environment-warnings --fatal-errors"
+
+UNBOUND_OPTION=""
+if [[ ! -z "$TEST_WITH_UNBOUND_CPU" ]]; then
+    UNBOUND_OPTION="-u"
+fi
+
+# Note enabling software counters in GLOBAL_OPTIONS !
 if [[ "$NO_CHECK_CACHED_MMAP" == "" ]]; then
     GLOBAL_OPTIONS="${GLOBAL_OPTIONS} --check-cached-mmaps"
 fi
@@ -164,6 +179,10 @@ export _RR_CPU_LOCK_FILE="/tmp/rr-test-cpu-lock"
 
 # Set options to find rr and resource files in the expected places.
 export PATH="${OBJDIR}/bin:${PATH}"
+
+if [[ -z "$_RR_PATCH_LOC_DB_DIR" ]]; then
+    export _RR_PATCH_LOC_DB_DIR="${OBJDIR}/patch-loc-cache"
+fi
 
 # Resource path is normally the same as the build directory, however, it is
 # slightly different when using the installable testsuite. The installable
@@ -279,7 +298,7 @@ function skip_if_syscall_buf {
 
 function just_record { exe="$1"; exeargs=$2;
     _RR_TRACE_DIR="$workdir" test-monitor $TIMEOUT record.err \
-        $RR_EXE $GLOBAL_OPTIONS record $LIB_ARG $RECORD_ARGS "$exe" $exeargs 1> record.out 2> record.err
+        $RR_EXE $GLOBAL_OPTIONS record $SOFTWARE_COUNTING_STRATEGY $LIB_ARG $RECORD_ARGS "$exe" $exeargs 1> record.out 2> record.err
 }
 
 function save_exe { exe=$1;
@@ -319,7 +338,7 @@ function record_async_signal { sig=$1; delay_secs=$2; exe=$3; exeargs=$4;
 
 function replay { replayflags=$1
     _RR_TRACE_DIR="$workdir" test-monitor $TIMEOUT replay.err \
-        $RR_EXE $GLOBAL_OPTIONS replay --retry-transient-errors -a \
+        $RR_EXE $GLOBAL_OPTIONS replay $UNBOUND_OPTION --retry-transient-errors -a \
         $replayflags 1> replay.out 2> replay.err
 }
 
@@ -372,7 +391,7 @@ function debug_lldb_only { expectscript=$1; replayargs=$2
 function debug_gdb_only { expectscript=$1; replayargs=$2
     RR_LOG_FILE=rr.log _RR_TRACE_DIR="$workdir" test-monitor $TIMEOUT test-monitor.output \
         python3 $TESTDIR/$expectscript.py \
-        $RR_EXE $GLOBAL_OPTIONS replay -o-n -o-ix -o$TESTDIR/test_setup.gdb $replayargs
+        $RR_EXE $GLOBAL_OPTIONS replay $UNBOUND_OPTION -o-n -o-ix -o$TESTDIR/test_setup.gdb $replayargs
     if [[ $? == 0 ]]; then
         passed_msg gdb
     else
@@ -526,7 +545,7 @@ function debug_test_gdb_only {
 # the recording.
 function rerun_singlestep_test {
     record $TESTNAME
-    rerun "--singlestep=rip,gp_x16,flags"
+    rerun $UNBOUND_OPTION "--singlestep=rip,gp_x16,flags"
 }
 
 # Return an rr dump result of the most recent local recording.

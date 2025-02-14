@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+if [ "$1" != "" ]; then
+  if [ -d "$1" ]; then
+    echo cache entries in "$1": 1>&2
+    fd . -I -d 1 "$1" | xargs -Iz sh -c 'printf "%s:%s\n" $(basename z) $(cat z/filename.txt)'
+  else
+    echo "$1" does not exist ! 1>&2
+    exit 1
+  fi
+elif [ -d patch-loc-cache ]; then
+  echo cache entries in "$(pwd)/patch-loc-cache": 1>&2
+  fd . -I -d 1 patch-loc-cache | xargs -Iz sh -c 'printf "%s:%s\n" $(basename z) $(cat z/filename.txt)'
+elif [ -d ~/.cache/rr ]; then
+  echo cache entries in ~/.cache/rr 1>&2
+  fd . -I -d 1 ~/.cache/rr | xargs -Iz sh -c 'printf "%s:%s\n" $(basename z) $(cat z/filename.txt)'
+else
+  echo ~/.cache/rr does not exist ! 1>&2
+  exit 1
+fi

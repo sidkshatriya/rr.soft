@@ -80,11 +80,6 @@ static TraceStream::Substream operator++(TraceStream::Substream& s) {
   return s;
 }
 
-static bool dir_exists(const string& dir) {
-  struct stat dummy;
-  return !dir.empty() && stat(dir.c_str(), &dummy) == 0;
-}
-
 static string default_rr_trace_dir() {
   static string cached_dir;
 
@@ -489,6 +484,15 @@ void TraceWriter::write_frame(RecordTask* t, const Event& ev,
           e.mprotect_records.size() * sizeof(mprotect_record)));
       break;
     }
+    case EV_OVERLAY_PROTECT: {
+      const OverlayProtectEvent& e = ev.OverlayProtect();
+      auto op = event.initOverlayProtect();
+      op.setSize(e.mprotect_record.size);
+      op.setProt(e.mprotect_record.prot);
+      op.setStart(e.mprotect_record.start);
+      op.setOverlayExec(e.mprotect_record.overlay_exec);
+      break;
+    }
     case EV_SYSCALL: {
       const SyscallEvent& e = ev.Syscall();
       auto syscall = event.initSyscall();
@@ -498,6 +502,9 @@ void TraceWriter::write_frame(RecordTask* t, const Event& ev,
                             : e.number);
       syscall.setState(to_trace_syscall_state(e.state));
       syscall.setFailedDuringPreparation(e.failed_during_preparation);
+      syscall.setMprotectRecords(Data::Reader(
+          reinterpret_cast<const uint8_t*>(e.mprotect_records.data()),
+          e.mprotect_records.size() * sizeof(mprotect_record)));
       auto data = syscall.initExtra();
       if (e.write_offset >= 0) {
         data.setWriteOffset(e.write_offset);
@@ -555,7 +562,9 @@ TraceFrame TraceReader::read_frame(FrameTime skip_before) {
   auto& events = reader(EVENTS);
   word buf[reasonable_frame_message_words];
   CompressedReaderInputStream stream(events);
-  PackedMessageReader frame_msg(stream, ReaderOptions(), buf);
+  auto options = ReaderOptions();
+  options.traversalLimitInWords = 20 * 1024 * 1024;
+  PackedMessageReader frame_msg(stream, options, buf);
   tick_time();
   TraceFrame ret;
   ret.global_time = time();
@@ -677,11 +686,28 @@ TraceFrame TraceReader::read_frame(FrameTime skip_before) {
       }
       break;
     }
+    case trace::Frame::Event::OVERLAY_PROTECT: {
+      auto mprotect_record = event.getOverlayProtect();
+      struct mprotect_record rec {
+        .start = mprotect_record.getStart(), .size = mprotect_record.getSize(),
+        .prot = mprotect_record.getProt(),
+        .overlay_exec = mprotect_record.getOverlayExec()
+      };
+      ret.ev = Event(rec);
+      break;
+    }
     case trace::Frame::Event::SYSCALL: {
       auto syscall = event.getSyscall();
       ret.ev = Event(SyscallEvent(syscall.getNumber(),
                                   from_trace_arch(syscall.getArch())));
       auto& syscall_ev = ret.ev.Syscall();
+      auto& mprotect_records = syscall_ev.mprotect_records;
+      auto mprotect_records_data = event.getSyscall().getMprotectRecords();
+      mprotect_records.resize(mprotect_records_data.size() / sizeof(mprotect_record));
+      if (mprotect_records.data()) {
+        memcpy(mprotect_records.data(), mprotect_records_data.begin(),
+               mprotect_records.size() * sizeof(mprotect_record));
+      }
       syscall_ev.state = from_trace_syscall_state(syscall.getState());
       syscall_ev.failed_during_preparation =
           syscall.getFailedDuringPreparation();

@@ -419,7 +419,7 @@ static bool always_recreate_counters(const perf_event_attrs &perf_attr) {
   // When we have the KVM IN_TXCP bug, reenabling the TXCP counter after
   // disabling it does not work.
   DEBUG_ASSERT(perf_attr.checked);
-  return perf_attr.has_ioc_period_bug || has_kvm_in_txcp_bug;
+  return perf_attr.has_ioc_period_bug || has_kvm_in_txcp_bug || perf_attr.software_counter;
 }
 
 static void arch_check_restricted_counter() {

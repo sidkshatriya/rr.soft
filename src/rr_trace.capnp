@@ -318,6 +318,13 @@ struct MemRange {
   end @1 :RemotePtr;
 }
 
+struct MprotectRecord {
+  start @0 :RemotePtr;
+  size @1 :UInt64;
+  prot @2 :Int32;
+  overlayExec @3 :Bool;
+}
+
 # The 'events' file is a sequence of these.
 struct Frame {
   tid @0 :Tid;
@@ -383,9 +390,12 @@ struct Frame {
         # and REMOVE.
         madviseRanges @32 :List(MemRange);
       }
+      mprotectRecords @33 :Data;
     }
     patchAfterSyscall @26: Void;
     patchVsyscall @27: Void;
     patchTrappingInstruction @31: Void;
+    overlayProtect @34 :MprotectRecord;
   }
 }
+

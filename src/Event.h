@@ -86,6 +86,7 @@ enum EventType {
   EV_SIGNAL_HANDLER,
   // Use .syscall.
   EV_SYSCALL,
+  EV_OVERLAY_PROTECT,
 
   EV_LAST
 };
@@ -280,8 +281,16 @@ struct SyscallEvent {
   bool failed_during_preparation;
   // Syscall is being emulated via PTRACE_SYSEMU.
   bool in_sysemu;
+
+  std::vector<mprotect_record> mprotect_records;
+
   // True if we should retry patching on exit from this syscall
   bool should_retry_patch;
+};
+
+struct OverlayProtectEvent {
+  OverlayProtectEvent(struct mprotect_record rec) : mprotect_record(rec) {}
+  struct mprotect_record mprotect_record;
 };
 
 struct syscall_interruption_t {
@@ -300,6 +309,8 @@ struct Event {
   Event(EventType type, const SignalEvent& ev) : event_type(type), signal(ev) {}
   Event(const SyscallbufFlushEvent& ev)
       : event_type(EV_SYSCALLBUF_FLUSH), syscallbuf_flush(ev) {}
+  Event(const struct mprotect_record rec)
+      : event_type(EV_OVERLAY_PROTECT), overlay_protect_(rec) {}
   Event(const SyscallEvent& ev) : event_type(EV_SYSCALL), syscall(ev) {}
   Event(const syscall_interruption_t&, const SyscallEvent& ev)
       : event_type(EV_SYSCALL_INTERRUPTION), syscall(ev) {}
@@ -343,6 +354,14 @@ struct Event {
     return syscallbuf_flush;
   }
 
+  OverlayProtectEvent& OverlayProtect() {
+    DEBUG_ASSERT(EV_OVERLAY_PROTECT == event_type);
+    return overlay_protect_;
+  }
+  const OverlayProtectEvent& OverlayProtect() const {
+    DEBUG_ASSERT(EV_OVERLAY_PROTECT == event_type);
+    return overlay_protect_;
+  }
   SignalEvent& Signal() {
     DEBUG_ASSERT(is_signal_event());
     return signal;
@@ -428,6 +447,7 @@ private:
     SchedEvent sched_;
     SignalEvent signal;
     SyscallEvent syscall;
+    OverlayProtectEvent overlay_protect_;
     SyscallbufFlushEvent syscallbuf_flush;
   };
 };

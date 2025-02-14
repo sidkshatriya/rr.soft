@@ -28,6 +28,7 @@
 #include "log.h"
 #include "remote_code_ptr.h"
 #include "util.h"
+#include "ElfReader.h"
 
 namespace rr {
 
@@ -200,7 +201,7 @@ inline std::ostream& operator<<(std::ostream& o, const KernelMapping& m) {
  * less than |b|'s/
  */
 struct MappingComparator {
-  bool operator()(const MemoryRange& a, const MemoryRange& b) const {
+  inline bool operator()(const MemoryRange& a, const MemoryRange& b) const {
     return !a.intersects(b) && a.start() < b.start();
   }
 };
@@ -290,6 +291,10 @@ public:
     // equal to 'map'.
     const KernelMapping recorded_map;
     const EmuFile::shr_ptr emu_file;
+    // Usually the build_id of a binary, otherwise the sha256sum
+    // Only available and relevant during recording
+    // Only set if it may be required later in the program
+    std::optional<std::string> unique_id;
     std::unique_ptr<struct stat> mapped_file_stat;
     // If this mapping has been mapped into the local address space,
     // this is the address of the first byte of the equivalent local mapping.
@@ -301,7 +306,7 @@ public:
     const std::shared_ptr<MonitoredSharedMemory> monitored_shared_memory;
     // Flags indicate mappings that require special handling. Adjacent mappings
     // may only be merged if their `flags` value agree.
-    enum : uint32_t {
+    enum : uint64_t {
       FLAG_NONE = 0x0,
       // This mapping represents a syscallbuf. It needs to handled specially
       // during checksumming since its contents are not fully restored by the
@@ -316,8 +321,10 @@ public:
       IS_RR_PAGE = 0x8,
       // This mapping is the rr vdso page
       IS_RR_VDSO_PAGE = 0x10,
+      IS_SOFTWARE_COUNTER_PATCH_STUBS = 0x20,
+      IS_SOFTWARE_COUNTER_OVERLAY_EXEC = 0x40,
     };
-    uint32_t flags;
+    uint64_t flags;
   };
 
   typedef std::map<MemoryRange, Mapping, MappingComparator> MemoryMap;
@@ -464,7 +471,9 @@ public:
    * Return a reference to the flags of the mapping at this address, allowing
    * manipulation. There must exist a mapping at `addr`.
    */
-  uint32_t& mapping_flags_of(remote_ptr<void> addr);
+  uint64_t& mapping_flags_of(remote_ptr<void> addr);
+
+  std::optional<std::string>& mapping_unique_id_of(remote_ptr<void> addr);
 
   /**
    * Return true if there is some mapping for the byte at 'addr'.
@@ -830,6 +839,7 @@ public:
   remote_ptr<void> find_free_memory(Task* t,
       size_t len, remote_ptr<void> after = remote_ptr<void>(),
       FindFreeMemoryPolicy policy = FindFreeMemoryPolicy::STRICT_SEARCH);
+  remote_ptr<void> find_free_memory_before(Task* t, const size_t len, const remote_ptr<void> before);
 
   /**
    * The return value indicates whether we (re)created the preload_thread_locals
@@ -884,6 +894,10 @@ public:
   };
 
   void map_rr_page(AutoRemoteSyscalls& remote);
+
+  bool map_software_counter_jump_stub_area(Task& t,
+                                           remote_ptr<void> start, size_t len);
+
   static std::vector<uint8_t> read_rr_page_for_recording(SupportedArch arch);
   struct UnmapOptions {
     bool exclude_vdso_vvar;

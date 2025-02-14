@@ -474,6 +474,9 @@ TempFile create_temporary_file(const char* pattern);
  */
 ScopedFd open_memory_file(const std::string &name);
 
+// Requires Linux > 3.17
+ScopedFd create_memfd_file(const std::string &real_name);
+
 void good_random(void* out, size_t out_len);
 
 std::vector<std::string> current_env();
@@ -698,6 +701,10 @@ void replace_in_buffer(MemoryRange src, const uint8_t* src_data,
 void base_name(std::string& s);
 
 std::optional<int> read_perf_event_paranoid();
+
+bool dir_exists(const std::string& dir);
+
+std::string sha256sum(const std::string& fsname);
 
 bool virtual_address_size_supported(uint8_t bit_size);
 

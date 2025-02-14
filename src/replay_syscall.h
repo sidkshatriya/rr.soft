@@ -3,6 +3,7 @@
 #ifndef RR_REP_PROCESS_EVENT_H_
 #define RR_REP_PROCESS_EVENT_H_
 
+#include "AutoRemoteSyscalls.h"
 #include "TraceStream.h"
 
 namespace rr {
@@ -31,6 +32,8 @@ void rep_process_syscall(ReplayTask* t, ReplayTraceStep* step);
  * in replay_syscall.
  */
 void process_grow_map(ReplayTask* t);
+
+void restore_software_counter_stubs(AutoRemoteSyscalls &remote);
 
 } // namespace rr
 

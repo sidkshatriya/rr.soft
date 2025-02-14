@@ -63,6 +63,7 @@ struct perf_event_attrs {
   bool has_ioc_period_bug = false;
   bool only_one_counter = false;
   bool activate_useless_counter = false;
+  bool software_counter = false;
 };
 // If this contains more than one element, it's indexed by the CPU index.
 static std::vector<perf_event_attrs> perf_attrs;
@@ -145,6 +146,7 @@ enum CpuMicroarch {
   AppleM2Blizzard,
   AppleM2Avalanche,
   LastARM = AppleM2Avalanche,
+  Software
 };
 
 /*
@@ -283,6 +285,7 @@ static const PmuConfig pmu_configs[] = {
     "apple_blizzard_pmu", 0x8c, -1, -1 },
   { AppleM2Avalanche, "Apple M2 Avalanche", 0x90, 0, 0, 1000, PMU_TICKS_TAKEN_BRANCHES,
     "apple_avalanche_pmu", 0x8c, -1, -1 },
+  {Software, "Software", 0, 0, 0, 0, PMU_TICKS_RCB},
 };
 
 #define RR_SKID_MAX 10000
@@ -512,6 +515,9 @@ static void check_working_counters(perf_event_attrs &perf_attr) {
 // Returns the ticks minimum period.
 static uint32_t check_for_bugs(perf_event_attrs &perf_attr) {
   DEBUG_ASSERT(!running_under_rr());
+  if (perf_attr.software_counter) {
+    return 1;
+  }
 
   uint32_t min_period = check_for_ioc_period_bug(perf_attr);
   check_working_counters(perf_attr);
@@ -560,9 +566,12 @@ static std::vector<PmuConfig> get_pmu_microarchs() {
     CLEAN_FATAL() << "No supported microarchitectures found.";
   }
   DEBUG_ASSERT(!pmu_uarchs.empty());
-  // Note that the `uarch` field after processed by `post_init_pmu_uarchs`
-  // is used to store the bug_flags and may not be the actual uarch.
-  post_init_pmu_uarchs(pmu_uarchs);
+  // If running with software counters this subsequent step is not necessary
+  if (pmu_uarchs[0].uarch != Software) {
+    // Note that the `uarch` field after processed by `post_init_pmu_uarchs`
+    // is used to store the bug_flags and may not be the actual uarch.
+    post_init_pmu_uarchs(pmu_uarchs);
+  }
   return pmu_uarchs;
 }
 
@@ -624,6 +633,11 @@ static void init_attributes() {
                            pmu_uarch.cycle_event);
       init_perf_event_attr(&perf_attr.llsc_fail, pmu_uarch.event_type,
                            pmu_uarch.llsc_cntr_event);
+
+      if (pmu_uarch.uarch == Software) {
+        perf_attr.software_counter = true;
+        perf_attr.only_one_counter = true;
+      }
     }
   }
 }
@@ -655,7 +669,7 @@ static void check_pmu(int pmu_index) {
 
   // Under rr we emulate idealized performance counters, so we can assume
   // none of the bugs apply.
-  if (running_under_rr()) {
+  if (running_under_rr() || perf_attr.software_counter) {
     return;
   }
 
@@ -717,12 +731,17 @@ PerfCounters::PerfCounters(pid_t tid, int cpu_binding,
                            TicksSemantics ticks_semantics, Enabled enabled,
                            IntelPTEnabled enable_pt)
     : tid(tid), pmu_index(get_pmu_index(cpu_binding)), ticks_semantics_(ticks_semantics),
-      enabled(enabled), opened(false), counting(false) {
+      enabled(enabled), opened(false), counting(false), software_counter(false) {
   if (!supports_ticks_semantics(ticks_semantics)) {
     FATAL() << "Ticks semantics " << ticks_semantics << " not supported";
   }
   if (enable_pt == PT_ENABLE) {
     pt_state = make_unique<PTState>();
+  }
+
+  auto &perf_attr = perf_attrs[pmu_index];
+  if (perf_attr.software_counter) {
+    software_counter = true;
   }
 }
 
@@ -925,32 +944,36 @@ void PerfCounters::start(Task* t, Ticks ticks_period) {
   if (!opened) {
     LOG(debug) << "Recreating counters with period " << ticks_period;
 
-    struct perf_event_attr attr = perf_attr.ticks;
-    struct perf_event_attr minus_attr = perf_attr.minus_ticks;
-    attr.sample_period = ticks_period;
-    fd_ticks_interrupt = start_counter(tid, -1, &attr);
-    if (minus_attr.config != 0) {
-      fd_minus_ticks_measure = start_counter(tid, fd_ticks_interrupt, &minus_attr);
-    }
-
-    if (!perf_attr.only_one_counter && !running_under_rr()) {
-      reset_arch_extras<NativeArch>();
-    }
-
-    if (perf_attr.activate_useless_counter && !fd_useless_counter.is_open()) {
-      // N.B.: This is deliberately not in the same group as the other counters
-      // since we want to keep it scheduled at all times.
-      fd_useless_counter = start_counter(tid, -1, &perf_attr.cycles);
-    }
-
-    if (fd_ticks_interrupt.is_open()) {
-      struct f_owner_ex own;
-      own.type = F_OWNER_TID;
-      own.pid = tid;
-      if (fcntl(fd_ticks_interrupt, F_SETOWN_EX, &own)) {
-        FATAL() << "Failed to SETOWN_EX ticks event fd";
+    if (software_counter) {
+      t->reset_soft_counter(ticks_period);
+    } else {
+      struct perf_event_attr attr = perf_attr.ticks;
+      struct perf_event_attr minus_attr = perf_attr.minus_ticks;
+      attr.sample_period = ticks_period;
+      fd_ticks_interrupt = start_counter(tid, -1, &attr);
+      if (minus_attr.config != 0) {
+        fd_minus_ticks_measure = start_counter(tid, fd_ticks_interrupt, &minus_attr);
       }
-      make_counter_async(fd_ticks_interrupt, PerfCounters::TIME_SLICE_SIGNAL);
+
+      if (!perf_attr.only_one_counter && !running_under_rr()) {
+        reset_arch_extras<NativeArch>();
+      }
+
+      if (perf_attr.activate_useless_counter && !fd_useless_counter.is_open()) {
+        // N.B.: This is deliberately not in the same group as the other counters
+        // since we want to keep it scheduled at all times.
+        fd_useless_counter = start_counter(tid, -1, &perf_attr.cycles);
+      }
+
+      if (fd_ticks_interrupt.is_open()) {
+        struct f_owner_ex own;
+        own.type = F_OWNER_TID;
+        own.pid = tid;
+        if (fcntl(fd_ticks_interrupt, F_SETOWN_EX, &own)) {
+          FATAL() << "Failed to SETOWN_EX ticks event fd";
+        }
+        make_counter_async(fd_ticks_interrupt, PerfCounters::TIME_SLICE_SIGNAL);
+      }
     }
 
     if (pt_state) {
@@ -960,21 +983,25 @@ void PerfCounters::start(Task* t, Ticks ticks_period) {
   } else {
     LOG(debug) << "Resetting counters with period " << ticks_period;
 
-    infallible_perf_event_reset_if_open(fd_ticks_interrupt);
-    if (ioctl(fd_ticks_interrupt, PERF_EVENT_IOC_PERIOD, &ticks_period)) {
-      FATAL() << "ioctl(PERF_EVENT_IOC_PERIOD) failed with period "
-              << ticks_period;
+    if (software_counter) {
+      t->reset_soft_counter(ticks_period);
+    } else {
+      infallible_perf_event_reset_if_open(fd_ticks_interrupt);
+      if (fd_ticks_interrupt.is_open() && ioctl(fd_ticks_interrupt, PERF_EVENT_IOC_PERIOD, &ticks_period)) {
+        FATAL() << "ioctl(PERF_EVENT_IOC_PERIOD) failed with period "
+                << ticks_period;
+      }
+      infallible_perf_event_enable_if_open(fd_ticks_interrupt);
+
+      infallible_perf_event_reset_if_open(fd_minus_ticks_measure);
+      infallible_perf_event_enable_if_open(fd_minus_ticks_measure);
+
+      infallible_perf_event_reset_if_open(fd_ticks_measure);
+      infallible_perf_event_enable_if_open(fd_ticks_measure);
+
+      infallible_perf_event_reset_if_open(fd_ticks_in_transaction);
+      infallible_perf_event_enable_if_open(fd_ticks_in_transaction);
     }
-    infallible_perf_event_enable_if_open(fd_ticks_interrupt);
-
-    infallible_perf_event_reset_if_open(fd_minus_ticks_measure);
-    infallible_perf_event_enable_if_open(fd_minus_ticks_measure);
-
-    infallible_perf_event_reset_if_open(fd_ticks_measure);
-    infallible_perf_event_enable_if_open(fd_ticks_measure);
-
-    infallible_perf_event_reset_if_open(fd_ticks_in_transaction);
-    infallible_perf_event_enable_if_open(fd_ticks_in_transaction);
 
     if (pt_state) {
       infallible_perf_event_enable_if_open(pt_state->pt_perf_event_fd);
@@ -992,6 +1019,7 @@ void PerfCounters::set_tid(pid_t tid) {
   this->tid = tid;
 }
 
+// This is essentially a nop for software counters
 void PerfCounters::close() {
   if (counting) {
     FATAL() << "Can't close while counting task " << tid;
@@ -1102,10 +1130,14 @@ Ticks PerfCounters::read_ticks(Task* t, Error* error) {
   uint64_t adjusted_counting_period =
       counting_period +
       (t->session().is_recording() ? recording_skid_size() : skid_size());
+
   uint64_t interrupt_val = 0;
-  if (fd_ticks_interrupt.is_open()) {
+  if (software_counter) {
+    interrupt_val = t->read_soft_counter() ;
+  } else if (fd_ticks_interrupt.is_open()) {
     interrupt_val = read_counter(fd_ticks_interrupt);
   }
+
   uint64_t ret;
   if (!fd_ticks_measure.is_open()) {
     if (fd_minus_ticks_measure.is_open()) {

@@ -297,10 +297,25 @@ public:
 
   struct Statistics {
     Statistics()
-        : bytes_written(0), ticks_processed(0), syscalls_performed(0) {}
+        : bytes_written(0),
+          ticks_processed(0),
+          syscalls_performed(0),
+          sc_jii_SIGSEGV(0),
+          sc_no_near_stub_mem(0),
+          sc_jump_stubs_allocated(0),
+          sc_jump_areas_stub_capacity(0),
+          sc_jump_areas_mmaped(0) {}
     uint64_t bytes_written;
     Ticks ticks_processed;
     uint32_t syscalls_performed;
+    // Here the "sc" prefix means "software counters"
+    size_t sc_jii_performed;
+    size_t sc_jii_SIGSEGV;
+    size_t sc_one_go_performed;
+    size_t sc_no_near_stub_mem;
+    size_t sc_jump_stubs_allocated;
+    size_t sc_jump_areas_stub_capacity;
+    size_t sc_jump_areas_mmaped;
   };
   void accumulate_bytes_written(uint64_t bytes_written) {
     statistics_.bytes_written += bytes_written;
@@ -308,6 +323,21 @@ public:
   void accumulate_syscall_performed() { statistics_.syscalls_performed += 1; }
   void accumulate_ticks_processed(Ticks ticks) {
     statistics_.ticks_processed += ticks;
+  }
+  void accumulate_sc_jii_SIGSEGV() {
+    statistics_.sc_jii_SIGSEGV += 1;
+  }
+  void accumulate_no_near_stub_mem() {
+    statistics_.sc_no_near_stub_mem += 1;
+  }
+  void accumulate_sc_jump_stubs_allocated() {
+    statistics_.sc_jump_stubs_allocated += 1;
+  }
+  void accumulate_sc_jump_areas_mmaped() {
+    statistics_.sc_jump_areas_mmaped += 1;
+  }
+  void accumulate_sc_jump_areas_stub_capacity(size_t additional_capacity) {
+    statistics_.sc_jump_areas_stub_capacity += additional_capacity;
   }
   Statistics statistics() { return statistics_; }
 
