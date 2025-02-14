@@ -73,14 +73,14 @@ public:
     return remote_ptr<U>(ptr);
   }
 
-  explicit operator bool() const { return ptr != 0; }
-  bool operator!() const { return !ptr; }
-  bool operator<(const remote_ptr<T>& other) const { return ptr < other.ptr; }
-  bool operator<=(const remote_ptr<T>& other) const { return ptr <= other.ptr; }
-  bool operator==(const remote_ptr<T>& other) const { return ptr == other.ptr; }
-  bool operator!=(const remote_ptr<T>& other) const { return ptr != other.ptr; }
-  bool operator>(const remote_ptr<T>& other) const { return ptr > other.ptr; }
-  bool operator>=(const remote_ptr<T>& other) const { return ptr >= other.ptr; }
+  inline explicit operator bool() const { return ptr != 0; }
+  inline bool operator!() const { return !ptr; }
+  inline bool operator<(const remote_ptr<T>& other) const { return ptr < other.ptr; }
+  inline bool operator<=(const remote_ptr<T>& other) const { return ptr <= other.ptr; }
+  inline bool operator==(const remote_ptr<T>& other) const { return ptr == other.ptr; }
+  inline bool operator!=(const remote_ptr<T>& other) const { return ptr != other.ptr; }
+  inline bool operator>(const remote_ptr<T>& other) const { return ptr > other.ptr; }
+  inline bool operator>=(const remote_ptr<T>& other) const { return ptr >= other.ptr; }
 
   bool is_null() const { return !ptr; }
 
