@@ -781,6 +781,7 @@ template <typename Arch> int AutoRemoteSyscalls::send_fd_arch(const ScopedFd &ou
   // from it.
   ASSERT(t, child_syscall_result >= 0 || child_syscall_result == -ESRCH)
     << "Failed to recvmsg() in tracee; err=" << errno_name(-child_syscall_result);
+  LOG(debug) << "fd received in tracee was: " << child_syscall_result;
   return child_syscall_result;
 }
 
