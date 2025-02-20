@@ -3157,7 +3157,7 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
     if (status.ok()) {
       ASSERT(&t, db_rdonly);
       ASSERT(&t, vec_cfh.size() == 2);
-      auto cfh = vec_cfh[1];
+      rocksdb::ColumnFamilyHandle* cfh = vec_cfh[1];
       std::string val;
       const rocksdb::ReadOptions default_read_options;
       status = db_rdonly->Get(default_read_options, cfh,
@@ -3169,6 +3169,13 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
                                      already_statically_instrumented };
       LOG(debug) << fsname << " already_statically_instrumented: "
                  << already_statically_instrumented;
+      // rocksdb BUG? It should not be necessary to Destroy the default family handle
+      // This is necessary otherwise ubuntu 24.04 fails with
+      // ./db/column_family.cc:1682: rocksdb::ColumnFamilySet::~ColumnFamilySet(): Assertion `last_ref' failed.
+      // Interestingly this Destroy is not necessary in Fedora 41 however this is useful because
+      // suddenly all ctest issues when rr is compiled with -Dasan=ON dissappear !!
+      status = db_rdonly->DestroyColumnFamilyHandle(vec_cfh[0]);
+      ASSERT(&t, status.ok()) << status.getState();
       status = db_rdonly->DestroyColumnFamilyHandle(cfh);
       ASSERT(&t, status.ok()) << status.getState();
       auto& res = patchdb_map[unique_id];
@@ -3195,7 +3202,7 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
     ASSERT(&t, status.ok()) << status.getState();
     ASSERT(&t, dbp);
     ASSERT(&t, vec_cfh.size() == 2);
-    auto cfh = vec_cfh[1];
+    rocksdb::ColumnFamilyHandle* cfh = vec_cfh[1];
     unique_ptr<rocksdb::DB> db(dbp);
 
     rocksdb::WriteOptions default_write_options_tmp;
@@ -3234,6 +3241,9 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
                        rocksdb::Slice());
       ASSERT(&t, status.ok()) << status.getState();
     }
+    // rocksdb BUG? See note above on DestroyColumnFamilyHandle for the default column family
+    status = db->DestroyColumnFamilyHandle(vec_cfh[0]);
+    ASSERT(&t, status.ok()) << status.getState();
     status = db->DestroyColumnFamilyHandle(cfh);
     ASSERT(&t, status.ok()) << status.getState();
     status = db->Close();
