@@ -739,12 +739,12 @@ static const char* stringify_flags(int flags) {
       return " [thread_locals]";
     case AddressSpace::Mapping::IS_PATCH_STUBS:
       return " [patch_stubs]";
-    case AddressSpace::Mapping::IS_SOFTWARE_COUNTER_PATCH_STUBS:
-      return " [software_counter_patch_stubs]";
     case AddressSpace::Mapping::IS_RR_PAGE:
       return " [rr_page]";
     case AddressSpace::Mapping::IS_RR_VDSO_PAGE:
       return " [rr_vdso_page]";
+    case AddressSpace::Mapping::IS_SOFTWARE_COUNTER_PATCH_STUBS:
+      return " [software_counter_patch_stubs]";
     default:
       return " [unknown_flags]";
   }
