@@ -745,6 +745,8 @@ static const char* stringify_flags(int flags) {
       return " [rr_vdso_page]";
     case AddressSpace::Mapping::IS_SOFTWARE_COUNTER_PATCH_STUBS:
       return " [software_counter_patch_stubs]";
+    case AddressSpace::Mapping::IS_SOFTWARE_COUNTER_OVERLAY_EXEC:
+      return " [software_counter_overlay_exec]";
     default:
       return " [unknown_flags]";
   }
