@@ -1,0 +1,8 @@
+.cache/**
+hello.c.*
+hello.noopt
+hello
+.enable-format
+libSoftwareCountersGcc.so
+compile_commands.json
+**/.gdb_history
