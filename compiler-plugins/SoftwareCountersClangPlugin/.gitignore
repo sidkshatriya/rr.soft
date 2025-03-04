@@ -1,0 +1,6 @@
+.cache
+compile_commands.json
+build
+.enable-format
+**/.DS_Store
+**/.gdb_history
