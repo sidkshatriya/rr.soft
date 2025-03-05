@@ -30,6 +30,14 @@ using namespace llvm;
 
 namespace {
 
+auto AddrTicksHI_aarch64 = itostr(RR_AARCH64_CUSTOM_TICKS_ADDR >> 16);
+auto AddrTicksLO_aarch64 = itostr(RR_AARCH64_CUSTOM_TICKS_ADDR & 0xFFFF);
+
+auto AddrTicksReachedBreakHI_aarch64 =
+    itostr(RR_AARCH64_CUSTOM_TARGET_REACHED_BREAK_ADDR >> 16);
+auto AddrTicksReachedBreakLO_aarch64 =
+    itostr(RR_AARCH64_CUSTOM_TARGET_REACHED_BREAK_ADDR & 0xFFFF);
+
 #define SOFT_COUNTER_ENABLE_NAME "__soft_cnt_enable"
 
 void InsertSoftCounterEnableGlobal(LLVMContext &C, Module &M) {
@@ -42,6 +50,119 @@ void InsertSoftCounterEnableGlobal(LLVMContext &C, Module &M) {
   SoftCounterEnable->setLinkage(GlobalValue::LinkOnceODRLinkage);
   SoftCounterEnable->setVisibility(GlobalValue::HiddenVisibility);
   SoftCounterEnable->setInitializer(MinInt32);
+}
+
+void InsertCounterFunctionWithDefinitionAArch64(LLVMContext &C, Module &M,
+                                                FunctionCallee &FC) {
+  auto VoidTy = Type::getVoidTy(C);
+
+  auto SoftCounterEnable = M.getNamedGlobal(SOFT_COUNTER_ENABLE_NAME);
+  assert(SoftCounterEnable);
+  SoftCounterEnable->setVisibility(GlobalValue::HiddenVisibility);
+
+  ///////////////////
+  // Create the function itself
+  Function *DoSoftwareCountFunc = dyn_cast<Function>(FC.getCallee());
+  DoSoftwareCountFunc->setLinkage(GlobalValue::LinkOnceODRLinkage);
+  DoSoftwareCountFunc->setVisibility(GlobalValue::HiddenVisibility);
+  DoSoftwareCountFunc->setCallingConv(CallingConv::PreserveAll);
+  DoSoftwareCountFunc->addFnAttr(Attribute::NoInline);
+  DoSoftwareCountFunc->setDoesNotThrow();
+
+  BasicBlock *BB =
+      BasicBlock::Create(C, "enter __do_software_count", DoSoftwareCountFunc);
+  IRBuilder<> IRB{BB};
+  //////////////////////
+  // __soft_cnt_enable == 0x8000'0000 (int32 min) means that the variable has not been
+  // initialized
+  // __soft_cnt_enable == 0 means that software counting is disabled (hardware
+  // counters enabled) (program running under rr)
+  // __soft_cnt_enable < 0 means that software counting is disabled (program NOT
+  // running under rr)
+  // (Even though Int32 min is negative, the value of __soft_cnt_enable is set through
+  //  syscalls. Negative return values never reach as low as Int32 min)
+  // __soft_cnt_enable > 0 means that software counting is enabled (program
+  // running under rr)
+
+  auto FuncTypeM =
+      FunctionType::get(VoidTy, {SoftCounterEnable->getType()}, false);
+  auto asmString =
+      "2: ldr w17, [$0]\n"
+      "cmp w17, #0x1\n"
+      "b.lt 4f\n"
+      // Note: Ensure that w8 always remains 1 though this inline asm
+      "mov	w8, #0x1\n"
+      "mov	w17, #" +
+      AddrTicksLO_aarch64 +
+      "\n"
+      "movk	w17, #" +
+      AddrTicksHI_aarch64 +
+      ", lsl #16\n"
+      "mov	x1, #0x0123\n"
+      "movk	x1, #0x4567, lsl #16\n"
+      "movk	x1, #0x89AB, lsl #32\n"
+      "movk	x1, #0xCDEF, lsl #48\n"
+      // with x1 now fully loaded with some sentinel value as of above
+      // instruction, the critical section has begun
+      "ldadd	x8, x16, [x17]\n"
+      // Here the important assumption is that
+      // ticks target is stored just after ticks
+      "ldp	x16, x17, [x17]\n"
+      "cmp	x16, x17\n"
+      "b.lt	3f\n"
+      "mov	w16, #" +
+      AddrTicksReachedBreakLO_aarch64 +
+      "\n"
+      "movk	w16, #" +
+      AddrTicksReachedBreakHI_aarch64 +
+      ", lsl #16\n"
+      // *AddrTicksReachBreak = 1
+      "swp	w8, wzr, [x16]\n"
+      // Trap to the ptracer
+      "brk	#0\n"
+      "3: mov	w16, #0x0\n"
+      "mov	w17, #0x0\n"
+      "msr	nzcv, xzr\n"
+      // Critical section ends after mov completes
+      "mov	x1, xzr\n"
+      "ret\n"
+      "4:\n"
+      "mov w8, 0x80000000\n"
+      "cmp w8, w17\n"
+      "b.eq 5f\n"
+      "ret\n"
+      "5: mov w8, #0x3f0\n"
+      "mov x0, 0\n"
+      // Need to set all syscall parameters to 0 (except x1) otherwise the
+      // syscall SYS_rrcall_check_presence returns -EINVAL. Set syscall arg2 to 1
+      // to check if running under rr in software counters mode
+      "mov x1, 1\n"
+      "mov x2, 0\n"
+      "mov x3, 0\n"
+      "mov x4, 0\n"
+      "mov x5, 0\n"
+      // Doing `b 1f; mov x8, 0xdc` makes this an unpatcheable
+      // syscall. See Monkeypatcher::try_patch_syscall_aarch64().
+      // Do this to decrease interference while recording.
+      // These two instructions otherwise don't change the
+      // meaning of the program
+      "b 1f\n"
+      "mov x8, 0xdc\n"
+      "1: svc #0x0\n"
+      "str w0, [$0]\n"
+      "b 2b\n";
+  // x0 - x5, x8, x16, x17 were clobbered
+  // Also x7 is not reliably preserved across syscalls
+  auto constraintsString = "r,~{x8},~{x0},~{x1},~{x2},~{x3},~{x4},~{x5},~{x7}"
+                           ",~{x16},~{x17},~{nzcv},~{memory}";
+  auto err = InlineAsm::verify(FuncTypeM, constraintsString);
+  assert(!bool(err));
+
+  auto FuncAsmM =
+      InlineAsm::get(FuncTypeM, asmString, constraintsString, false);
+
+  IRB.CreateCall(FuncAsmM, {SoftCounterEnable});
+  IRB.CreateUnreachable();
 }
 
 auto AddrTicksX8664 = itostr(RR_X8664_CUSTOM_TICKS_ADDR);
@@ -166,6 +287,7 @@ void InsertCounterFunctionWithDefinitionX86_64(LLVMContext &C, Module &M,
 struct SoftwareCounters : PassInfoMixin<SoftwareCounters> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &_MAM) {
     Triple TargetTriple = Triple(M.getTargetTriple());
+    bool is_aarch64 = (TargetTriple.getArch() == Triple::aarch64);
     LLVMContext &C = M.getContext();
     auto VerboseModeEnv = getenv("SOFTWARE_COUNTERS_PASS_VERBOSE");
     bool IsVerbose = true;
@@ -233,8 +355,13 @@ struct SoftwareCounters : PassInfoMixin<SoftwareCounters> {
     if (InstrumentedAFunction) {
       // Now insert the software counter function definition that does the
       // counting
-      InsertSoftCounterEnableGlobal(C, M);
-      InsertCounterFunctionWithDefinitionX86_64(C, M, DoSoftwareCountCallee);
+      if (is_aarch64) {
+        InsertSoftCounterEnableGlobal(C, M);
+        InsertCounterFunctionWithDefinitionAArch64(C, M, DoSoftwareCountCallee);
+      } else {
+        InsertSoftCounterEnableGlobal(C, M);
+        InsertCounterFunctionWithDefinitionX86_64(C, M, DoSoftwareCountCallee);
+      }
     }
     return PreservedAnalyses::none();
   }
