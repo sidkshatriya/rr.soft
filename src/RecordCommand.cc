@@ -506,9 +506,7 @@ static bool parse_record_arg(vector<string>& args, RecordFlags& flags) {
       flags.check_outside_mmaps = true;
       break;
     case 21:
-      if (opt.value == "basic") {
-        flags.software_counting_strategy = SCS_BASIC;
-      } else if (opt.value == "never-jii") {
+      if (opt.value == "never-jii") {
         flags.software_counting_strategy = SCS_NEVER_JII;
       } else if (opt.value == "always-jii") {
         flags.software_counting_strategy = SCS_ALWAYS_JII;
@@ -516,8 +514,7 @@ static bool parse_record_arg(vector<string>& args, RecordFlags& flags) {
         flags.software_counting_strategy = SCS_MINIMAL;
       } else {
         FATAL() << "Unknown software counting strategy `" << opt.value << "`"
-                << " valid values are `default`, `never-jii`, `always-jii`, "
-                   "`minimal`";
+                << " valid values are `never-jii`, `always-jii`, `minimal`";
       }
       break;
     case 's':

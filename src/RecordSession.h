@@ -18,10 +18,6 @@
 namespace rr {
 
 enum SC_Strategy {
-  // Mostly do just in time software counting dynamic instrumentation
-  // However for some cases (e.g. libc.so) do the dynamic instrumentation in one-go
-  // Usually faster than SCS_NEVER_JII
-  SCS_BASIC,
   // Never do just in time software counting dynamic instrumentation
   // i.e. do all the dynamic instrumentation on the map after a mmap / execve
   // Usually the slowest strategy
