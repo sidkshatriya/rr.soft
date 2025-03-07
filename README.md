@@ -62,7 +62,7 @@ Debugging extends gdb with very efficient reverse-execution, which in combinatio
 The currently upstream version of `rr` *cannot* run _without_ Hardware
 (HW) performance counters. Now, HW performance counters allow program
 "progress" to be measured exactly and this is critical for deterministic
-record/replay. They are usually disabled in VMs and
+record/replay. Access to these counters is usually disabled in VMs and
 containers for security reasons especially when running in the cloud. They
 may also be broken, unreliable or high latency for some CPUs too.
 
