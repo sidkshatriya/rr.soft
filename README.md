@@ -1,4 +1,4 @@
-# Software Counters mode `rr`
+# _Software Counters mode_ `rr`
 
 _Software Counters mode_ `rr`, is a modified version of the
 [rr](https://github.com/rr-debugger/rr.git) debugger that
@@ -40,8 +40,13 @@ $ rr replay -W
 # 😄 Profit !
 ```
 
-See https://github.com/sidkshatriya/rr.soft/wiki for detailed installation
-information and other FAQ.
+> [!important]
+> See https://github.com/sidkshatriya/rr.soft/wiki for detailed installation information and other FAQ.
+
+> [!important]
+> The _Software Counters mode_ `rr` executable is capable of running both _with_ and _without_ access to HW performance counters.
+> In other words, the functionality of running _with_ HW performance counters is still available should you need it.
+> Simply omit the `-W` flag when invoking `rr` !
 
 ## Details
 
@@ -136,14 +141,14 @@ and see how it goes from there !
 
 ## Building, Installing and other FAQ
 
-Building software counters mode `rr` differs from upstream rr a
+Building _Software Counters mode_ `rr` differs from upstream rr a
 bit. Additionally the compiler plugins that are packaged in this
 repository need to be built too.
 
 There are some other requirements and things to keep in mind too.
 
-To get started and also read the FAQ goto
-https://github.com/sidkshatriya/rr.soft/wiki
+> [!important]
+> To get started and also read the FAQ goto https://github.com/sidkshatriya/rr.soft/wiki
 
 ## Code Contributions
 
@@ -154,8 +159,8 @@ relates to plain vanilla `rr` please submit the contribution
 This repository will occationally merge in all applicable commits in
 upstream `rr`.
 
-Ordinarily, only code contributions related to Software Counters
-functionality are accepted in this repository.
+> [!important]
+> Ordinarily, only code contributions related to Software Counters functionality are accepted in this repository.
 
 ## License
 
