@@ -2,19 +2,12 @@
 
 cmake_minimum_required(VERSION 3.5)
 
+# It is definitely feasible to compile Software Counters mode rr with gcc/g++.
+# However, clang/clang++ has been tested the most so keep it that way for now.
+# In the future, could allow users to easily shift to gcc/g++.
 set(CMAKE_C_COMPILER clang)
 set(CMAKE_CXX_COMPILER clang++)
-set(SOFTWARE_COUNTERS_PLUGIN "$ENV{HOME}/libSoftwareCounters.so" CACHE STRING "\
-This plugin statically instruments code to support software counters. \
-It is set to `<YOUR-HOME-DIR>/libSoftwareCounters.so` by default. \
-If libSoftwareCounters.so is located elsewhere or with a different name, you can set that too. \
-On aarch64 instrumentation is done dynamically at runtime so you can pass in an empty string, \
-however, it is recommended to pass a valid plugin on aarch64 too so that librrpreload.so \
-is instrumented statically rather than dynamically at runtime (which is less efficient). \
-On x86_64 it is not possible to set this to an empty string. Finally note that rr will \
-*still* be able to run with hardware counters regardless of the setting for this variable."
-)
-
+set(SOFTWARE_COUNTERS_PLUGIN "" CACHE PATH "file location of clang compiler plugin")
 set(SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS OFF CACHE BOOL "\
 Should the rr test suite be statically instrumented with the software counters plugin ? \
 On aarch64 tests are instrumented dynamically at runtime so this is OFF by default. \
@@ -102,19 +95,11 @@ configure_file(
 if(${CMAKE_SYSTEM_PROCESSOR} MATCHES x86_64)
   # override. compulsory.
   set(SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS ON)
-  if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
-    message(FATAL_ERROR "Cannot set SOFTWARE_COUNTERS_PLUGIN to empty string, \
-                         please set to valid plugin path")
-  endif()
-elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
-  if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
-    if (${SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS})
-      message(FATAL_ERROR "As you have requested to statically instrument tests, you \
-                           cannot set SOFTWARE_COUNTERS_PLUGIN to the empty string. \
-                           Please set a valid plugin path.")
-    endif()
-    set(SOFTWARE_COUNTERS_PLUGIN_FLAG "")
-  endif()
+endif()
+
+if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
+  message(FATAL_ERROR "Cannot set SOFTWARE_COUNTERS_PLUGIN to empty string, \
+                       please set to valid plugin file for example: ~/libSoftwareCounters.so")
 endif()
 
 set(FLAGS_COMMON "-D__USE_LARGEFILE64 -pthread")
