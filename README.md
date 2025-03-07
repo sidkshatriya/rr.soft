@@ -123,10 +123,12 @@ for more detailed information on why `debuginfod` is necessary
 
 ### Running Software Counters mode `rr` within a container
 
-Note that it is _not_ neccessary that to run the above distributions
-in a VM or on bare metal. You could simply run the distribution in a container
+Note that it is _not_ neccessary to run _Software Counters mode_ `rr` 
+in the above distributions in a Virtual Machine or on bare metal. 
+
+You can actually run _Software Counters mode_ `rr` in a container
 using something like [podman](https://github.com/containers/podman) or 
-[distrobox](https://github.com/89luca89/distrobox).
+[distrobox](https://github.com/89luca89/distrobox) !
 
 ```bash
 $ distrobox enter fedora41
