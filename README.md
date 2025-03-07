@@ -157,6 +157,14 @@ upstream `rr`.
 Ordinarily, only code contributions related to Software Counters
 functionality are accepted in this repository.
 
+## License
+
+This repository is licensed under the same terms as https://github.com/rr-debugger/rr.git but the compiler plugins
+packaged with this repository under the `compiler-plugins/` directory are under different licenses:
+
+- The `clang` compiler plugin in the `compiler-plugins/SoftwareCountersClangPlugin` directory is licensed under `Apache License 2.0`
+- The `gcc` compiler plugin in the `compiler-plugins/SoftwareCountersGccPlugin` directory is licensed under `GNU General Public License v3.0 or later`
+
 ---
 
 # Overview
