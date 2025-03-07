@@ -7,7 +7,14 @@ cmake_minimum_required(VERSION 3.5)
 # In the future, could allow users to easily shift to gcc/g++.
 set(CMAKE_C_COMPILER clang)
 set(CMAKE_CXX_COMPILER clang++)
+
 set(SOFTWARE_COUNTERS_PLUGIN "" CACHE PATH "file location of clang compiler plugin")
+if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
+  message(FATAL_ERROR "Cannot set SOFTWARE_COUNTERS_PLUGIN to empty string, \
+                       please set to valid plugin file with full path. For example: \
+                       ~/libSoftwareCounters.so")
+endif()
+
 set(SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS OFF CACHE BOOL "\
 Should the rr test suite be statically instrumented with the software counters plugin ? \
 On aarch64 tests are instrumented dynamically at runtime so this is OFF by default. \
@@ -16,6 +23,9 @@ On x86_64 changing this setting is ignored as tests are always statically instru
 set(SOFTWARE_COUNTERS_PLUGIN_FLAG "-fpass-plugin=${SOFTWARE_COUNTERS_PLUGIN}")
 project(rr C CXX ASM)
 
+if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
+  message(FATAL_ERROR "This release does not have support for aarch64")
+endif()
 
 # "Do not add flags to export symbols from executables without the ENABLE_EXPORTS target property."
 # This avoids linking executables with -rdynamic. -rdynamic has been observed
@@ -95,11 +105,6 @@ configure_file(
 if(${CMAKE_SYSTEM_PROCESSOR} MATCHES x86_64)
   # override. compulsory.
   set(SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS ON)
-endif()
-
-if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
-  message(FATAL_ERROR "Cannot set SOFTWARE_COUNTERS_PLUGIN to empty string, \
-                       please set to valid plugin file for example: ~/libSoftwareCounters.so")
 endif()
 
 set(FLAGS_COMMON "-D__USE_LARGEFILE64 -pthread")
