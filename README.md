@@ -110,7 +110,16 @@ Why so few ? In short the distribution needs *robust*
 [`debuginfod`](https://documentation.ubuntu.com/server/reference/debugging/about-debuginfod/index.html)
 support. See
 [here](https://github.com/sidkshatriya/rr.soft/wiki#how-does-software-counters-mode-rr-work--why-does-it-require-debuginfod-)
-for more detailed information on why `debuginfod` is necessary.
+for more detailed information on why `debuginfod` is necessary
+
+> [!important]
+> When you invoke `rr record -W` the recording may occationally appear to "hang".
+> Actually, most probably, it is not a hang: `rr` is most likely trying to download some debugging
+> info from your Linux distribution's `debuginfod` server. This could take some time depending
+> on the speed of your internet connection and the amount of data that needs to be be downloaded.
+> Please be patient, this debugging info is cached and subsequent `rr record -W` of the
+> same program should not experience this "hang". Try to do `rr record -W --log=all:info <program>`
+> or `rr record -W --log=all:debug <program>` to debug the issue if the problem persists.
 
 ### Running Software Counters mode `rr` within a container
 
