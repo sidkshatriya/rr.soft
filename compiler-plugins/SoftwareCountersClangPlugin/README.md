@@ -31,9 +31,11 @@ _After building the plugin (`libSoftwareCounters.so`):_
 
 ```bash
 # Static instrumentation using the libSoftwareCounters.so plugin
+# Assume the plugin is stored in ~/ for the purposes of this example
 $ clang -fpass-plugin=~/libSoftwareCounters.so -g -O2 -o hello.c hello.c
 
 # Works with C++ also
+# Assume the plugin is stored in ~/ for the purposes of this example
 $ clang++ -fpass-plugin=~/libSoftwareCounters.so -g -O2 -o hello hello.cpp
 
 # Executable will work normally, might be a bit slower
