@@ -1,3 +1,5 @@
+INSTALL_PATH = $(HOME)
+
 all: cmake
 
 #--------------------------------
@@ -22,10 +24,7 @@ compile_commands: cmake
 check: test
 
 install: cmake
-	sudo cp build/libSoftwareCounters.so /usr/lib/
-
-hinstall: cmake
-	cp build/libSoftwareCounters.so ~/
+	cp build/libSoftwareCounters.so $(INSTALL_PATH)
 
 #--------------------------------
 %Opt.ll: %.ll cmake
