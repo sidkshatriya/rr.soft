@@ -1,6 +1,7 @@
 GCC=g++
 PLUGINS_DIR:=$(shell $(GCC) -print-file-name=plugin)
 ARCH := $(shell uname -m)
+INSTALL_PATH = $(HOME)
 
 ifeq ($(ARCH),aarch64)
     $(error aarch64 not supported in this version of the gcc plugin)
@@ -36,7 +37,4 @@ clean:
 	rm -f hello hello.noopt hello.c.* libSoftwareCountersGcc.so
 
 install: libSoftwareCountersGcc.so
-	sudo cp ./libSoftwareCountersGcc.so /usr/lib/
-
-hinstall: libSoftwareCountersGcc.so
-	cp ./libSoftwareCountersGcc.so ~/
+	cp ./libSoftwareCountersGcc.so $(INSTALL_PATH)
