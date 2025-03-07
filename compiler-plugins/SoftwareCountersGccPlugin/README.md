@@ -30,12 +30,12 @@ _After building the plugin (`libSoftwareCountersGcc.so`):_
 
 ```bash
 # Static instrumentation using the libSoftwareCountersGcc.so plugin
-# Assume the plugin is stored in ~/ for the purposes of this example
-$ gcc -fplugin=~/libSoftwareCountersGcc.so -o hello.c hello.c
+# Assume the plugin is stored in $HOME for the purposes of this example
+$ gcc -fplugin=$HOME/libSoftwareCountersGcc.so -o hello.c hello.c
 
 # Works with C++ also
 # Assume the plugin is stored in ~/ for the purposes of this example
-$ g++ -fplugin=~/libSoftwareCountersGcc.so -o hello hello.cpp
+$ g++ -fplugin=$HOME/libSoftwareCountersGcc.so -o hello hello.cpp
 
 # Executable will work normally, might be a bit slower
 $ ./hello
