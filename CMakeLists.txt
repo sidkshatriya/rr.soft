@@ -2,11 +2,21 @@
 
 cmake_minimum_required(VERSION 3.5)
 
-# It is definitely feasible to compile Software Counters mode rr with gcc/g++.
-# However, clang/clang++ has been tested the most so keep it that way for now.
-# In the future, could allow users to easily shift to gcc/g++.
-set(CMAKE_C_COMPILER clang)
-set(CMAKE_CXX_COMPILER clang++)
+# Use clang as the default C compiler
+# Software Counters mode instrumentation has been tested the most with it
+if (NOT CMAKE_C_COMPILER)
+  set(CMAKE_C_COMPILER clang)
+  message("CMAKE_C_COMPILER not specified, using clang")
+endif()
+
+# Use clang++ as the default c++ compiler
+# Software Counters mode instrumentation has been tested the most with it
+if (NOT CMAKE_CXX_COMPILER)
+  set(CMAKE_CXX_COMPILER clang++)
+  message("CMAKE_CXX_COMPILER not specified, using clang++")
+endif()
+
+project(rr C CXX ASM)
 
 set(SOFTWARE_COUNTERS_PLUGIN "" CACHE PATH "file location of clang compiler plugin")
 if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
@@ -20,8 +30,21 @@ Should the rr test suite be statically instrumented with the software counters p
 On aarch64 tests are instrumented dynamically at runtime so this is OFF by default. \
 On x86_64 changing this setting is ignored as tests are always statically instrumented."
 )
-set(SOFTWARE_COUNTERS_PLUGIN_FLAG "-fpass-plugin=${SOFTWARE_COUNTERS_PLUGIN}")
-project(rr C CXX ASM)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+  set(SOFTWARE_COUNTERS_PLUGIN_FLAG "-fplugin=${SOFTWARE_COUNTERS_PLUGIN}")
+elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+  set(SOFTWARE_COUNTERS_PLUGIN_FLAG "-fpass-plugin=${SOFTWARE_COUNTERS_PLUGIN}")
+else()
+  message(FATAL_ERROR "CMAKE_C_COMPILER_ID must be either GNU or Clang. Currently it is ${CMAKE_C_COMPILER_ID}")
+endif()
+
+if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang"))
+  message(FATAL_ERROR "CMAKE_CXX_COMPILER_ID must be either GNU or Clang. Currently it is ${CMAKE_CXX_COMPILER_ID}")
+endif()
+
+if(NOT (CMAKE_C_COMPILER_ID STREQUAL CMAKE_CXX_COMPILER_ID))
+  message(FATAL_ERROR "Both C and C++ compilers need to be either both from GNU family or Clang family. They cannot differ")
+endif()
 
 if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
   message(FATAL_ERROR "This release does not have support for aarch64")
