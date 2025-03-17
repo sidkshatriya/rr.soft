@@ -1,6 +1,8 @@
 source `dirname $0`/util.sh
 # Try recording without CPUID faulting and then replaying with it
-GLOBAL_OPTIONS=--disable-cpuid-faulting
+# Need to remember flags, specially --software-counters
+SAVED_GLOBAL_OPTIONS=$GLOBAL_OPTIONS
+GLOBAL_OPTIONS="$SAVED_GLOBAL_OPTIONS --disable-cpuid-faulting"
 record $TESTNAME
-GLOBAL_OPTIONS=
+GLOBAL_OPTIONS="$SAVED_GLOBAL_OPTIONS"
 debug_gdb_only x86/cpuid_singlestep
