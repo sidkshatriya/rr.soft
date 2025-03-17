@@ -44,6 +44,7 @@ namespace rr {
 #define PERF_COUNT_RR 0x72727272L
 
 static bool attributes_initialized;
+static bool cpu_improperly_configured;
 // At some point we might support multiple kinds of ticks for the same CPU arch.
 // At that point this will need to become more complicated.
 struct perf_event_attrs {
@@ -515,6 +516,7 @@ static void check_working_counters(perf_event_attrs &perf_attr) {
 // Returns the ticks minimum period.
 static uint32_t check_for_bugs(perf_event_attrs &perf_attr) {
   DEBUG_ASSERT(!running_under_rr());
+  cpu_improperly_configured = false;
   if (perf_attr.software_counter) {
     return 1;
   }
@@ -853,6 +855,10 @@ void PerfCounters::start_pt_copy_thread() {
   if (!pt_thread_state) {
     pt_thread_state = new PTCopyThreadState();
   }
+}
+
+bool PerfCounters::improperly_configured() {
+  return cpu_improperly_configured;
 }
 
 // See https://github.com/intel/libipt/blob/master/doc/howto_capture.md

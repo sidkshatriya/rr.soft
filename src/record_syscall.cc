@@ -3061,12 +3061,19 @@ static Switchable prepare_ptrace(RecordTask* t,
     case PTRACE_INTERRUPT: {
       RecordTask* tracee = verify_ptrace_target(t, syscall_state, pid, false);
       if (tracee) {
+        uint64_t result = 0;
         if (!tracee->is_stopped()) {
           // Running in a blocked syscall. Forward the PTRACE_INTERRUPT.
           // Regular syscall exit handling will take over from here.
+          LOG(debug) << "Interrupting " << tracee->tid;
           errno = 0;
           tracee->fallible_ptrace(PTRACE_INTERRUPT, nullptr, nullptr);
-          syscall_state.emulate_result(-errno);
+          result = -errno;
+          // Technically PTRACE_INTERRUPT stops are distinct from group stops,
+          // but not in any way we currently care about.
+          // NB: Despite the ptrace man page claiming the kernel sends SIGTRAP
+          // in practice it actually sends SIGSTOP.
+          tracee->apply_group_stop(SIGSTOP);
         } else if (tracee->status().is_syscall()) {
           tracee->emulate_ptrace_stop(tracee->status(), SYSCALL_EXIT_STOP);
         } else if (tracee->emulated_stop_pending == NOT_STOPPED) {
@@ -3075,7 +3082,7 @@ static Switchable prepare_ptrace(RecordTask* t,
           tracee->apply_group_stop(SIGSTOP);
         }
         // Otherwise, there's nothing to do.
-        syscall_state.emulate_result(0);
+        syscall_state.emulate_result(result);
       }
       break;
     }
@@ -3962,6 +3969,8 @@ static Switchable rec_prepare_syscall_arch(RecordTask* t,
         case Arch::GET_SEALS:
         case Arch::SET_RW_HINT:
         case Arch::SET_FILE_RW_HINT:
+        case Arch::SETLEASE:
+        case Arch::GETLEASE:
           break;
 
         case Arch::SETFD:
@@ -4736,6 +4745,23 @@ static Switchable rec_prepare_syscall_arch(RecordTask* t,
         case PR_SET_THP_DISABLE:
         case PR_SET_SECUREBITS:
         case PR_GET_SECUREBITS:
+        case PR_GET_TAGGED_ADDR_CTRL:
+          break;
+
+        case PR_SET_TAGGED_ADDR_CTRL:
+          if (regs.arg2() & ~PR_TAGGED_ADDR_ENABLE) {
+            // For now we only support enabling the tagged address ABI which
+            // only affects the semantics of syscalls. We don't support setting
+            // any of the MTE-related bits because they affect the semantics of
+            // normal load/store instructions (implying replay is required) as
+            // well as exposing non-determinism in the following ways:
+            // 1) With a non-empty tag inclusion mask, the tag computed by the
+            //    IRG instruction will be effectively random.
+            // 2) It is indeterminate when a SIGSEGV/SEGV_MTEAERR signal will
+            //    be raised if an asynchronous tag check fault is taken.
+            // Both of these issues should be fixable with some kernel changes.
+            syscall_state.emulate_result(-EINVAL);
+          }
           break;
 
         case PR_SET_DUMPABLE:
