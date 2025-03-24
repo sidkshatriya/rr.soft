@@ -1895,6 +1895,7 @@ set(TESTS_WITHOUT_PROGRAM
   vsyscall_singlestep
   watch_code
   watchpoint_cond
+  watchpoint_step
   watchpoint_unaligned2
   when
 )
