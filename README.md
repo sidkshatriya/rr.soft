@@ -14,6 +14,9 @@ due to security reasons. Even if CPU HW Performance counters are available, some
 unreliable, non-deterministic, broken or high latency. Removing this requirement allows `rr` 
 to be used in many more scenarios.
 
+Running `rr` record/replay *without* access to CPU HW performance counters
+is accomplished using **lightweight dynamic instrumentation**.
+
 _Instead of traditionally invoking:_
 ```bash
 $ rr record <your-program>
