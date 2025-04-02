@@ -65,10 +65,12 @@ if(POLICY CMP0148)
   cmake_policy(SET CMP0148 OLD)
 endif()
 
-# On single configuration generators, make Debug the default configuration
+# On single configuration generators, make Release the default configuration
+# Debug is quite slow for dynamic instrumentation. If users want it they
+# need to specify it explictly
 if(NOT CMAKE_CONFIGURATION_TYPES)
   if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Whether to build in `Debug` or `Release` mode." FORCE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Whether to build in `Debug` or `Release` mode." FORCE)
   endif()
 endif()
 
@@ -210,6 +212,10 @@ set(RR_FLAGS ${RR_FLAGS_RELEASE})
 # Now override for build type.
 string(TOLOWER ${CMAKE_BUILD_TYPE} LOWERCASE_CMAKE_BUILD_TYPE)
 if(LOWERCASE_CMAKE_BUILD_TYPE STREQUAL "debug")
+  message(WARNING "You have choosen CMAKE_BUILD_TYPE as `Debug`. Software Counters record/replay \
+will be perceptably slower than `Release` mode. \
+NOTE: only choose Debug if you intend to debug rr itself."
+)
   set(PRELOAD_COMPILE_FLAGS "${PRELOAD_COMPILE_FLAGS} -O2 -Werror")
   set(BROTLI_COMPILE_FLAGS "${RR_FLAGS_RELEASE} -O2")
   set(RR_TEST_FLAGS "${RR_TEST_FLAGS} -Werror")
