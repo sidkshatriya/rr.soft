@@ -19,7 +19,7 @@ class Task;
  * all zeroes.
  */
 struct ReturnAddressList {
-  enum { AARCH64_COUNT = 0, X86_COUNT = 8, MAX_COUNT = X86_COUNT };
+  enum { AARCH64_COUNT = 0, AARCH64_SOFT_COUNT = 8, X86_COUNT = 8, MAX_COUNT = X86_COUNT };
   remote_ptr<void> addresses[MAX_COUNT];
 
   /**

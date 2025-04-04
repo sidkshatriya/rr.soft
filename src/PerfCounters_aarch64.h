@@ -300,8 +300,8 @@ static void arch_check_restricted_counter() {
   }
 }
 
-static bool always_recreate_counters(__attribute__((unused)) const perf_event_attrs &perf_attr) {
-  return false;
+static bool always_recreate_counters(const perf_event_attrs &perf_attr) {
+  return perf_attr.software_counter;
 }
 
 static void check_for_arch_bugs(__attribute__((unused)) perf_event_attrs &perf_attr) {}

@@ -259,6 +259,19 @@ static uint64_t* xsave_features(vector<uint8_t>& data) {
 
 size_t ExtraRegisters::read_register(uint8_t* buf, GdbServerRegister regno,
                                      bool* defined) const {
+  if (arch() == aarch64) {
+    if (regno == DREG_PAUTH_DMASK) {
+      LOG(debug) << "Read DREG_PAUTH_DMASK";
+      *defined = true;
+      memcpy(buf, &user_pac_mask.data_mask, sizeof(user_pac_mask.data_mask));
+      return sizeof(user_pac_mask.data_mask);
+    } else if (regno == DREG_PAUTH_CMASK) {
+      LOG(debug) << "Read DREG_PAUTH_CMASK";
+      *defined = true;
+      memcpy(buf, &user_pac_mask.insn_mask, sizeof(user_pac_mask.insn_mask));
+      return sizeof(user_pac_mask.insn_mask);
+    }
+  }
   if (format_ == NT_FPR) {
     if (arch() != aarch64) {
       *defined = false;

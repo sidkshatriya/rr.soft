@@ -16,15 +16,29 @@ struct Unmaps {
   ssize_t nunmappings;
 };
 
+#ifdef SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS
+extern int __attribute__((visibility("hidden"))) __soft_cnt_enable;
+#endif
+
 int main(void);
 static int contains_symbol(map_properties_t* props, void* symbol) {
   return (props->start <= (uintptr_t)symbol && (uintptr_t)symbol < props->end);
 }
-void callback(uint64_t env, char* name, map_properties_t* props) {
+
+void callback_software_counters(uint64_t env, char* name, map_properties_t* props) {
   if (contains_symbol(props, &main) ||
       /* env is on the stack - this prevents it from being unmapped if
          the kernel gets confused by syscallbuf's stack switching */
       contains_symbol(props, &env) ||
+#ifdef SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS
+      contains_symbol(props, &__soft_cnt_enable) ||
+#endif
+#ifdef DYNAMIC_SOFTWARE_COUNTERS_SUPPORT_ENABLED
+      // For software counting can't remove the preload thread locals as it contains the counter
+      (props->start <= RR_THREAD_LOCALS_PAGE_ADDR && RR_THREAD_LOCALS_PAGE_ADDR < props->end) ||
+      // For software counting can't remove the software counting stubs also unfortunately
+      strstr(name, "SOFT_COUNT_STUB") != NULL ||
+#endif
       (props->start <= RR_PAGE_ADDR && RR_PAGE_ADDR < props->end) ||
       strcmp(name, "[stack]") == 0) {
     return;
@@ -36,6 +50,25 @@ void callback(uint64_t env, char* name, map_properties_t* props) {
   ++u->nunmappings;
 }
 
+void callback(uint64_t env, char* name, map_properties_t* props) {
+  if (contains_symbol(props, &main) ||
+      /* env is on the stack - this prevents it from being unmapped if
+         the kernel gets confused by syscallbuf's stack switching */
+      contains_symbol(props, &env) ||
+// Cannot be disabled, even when hw counters are in used
+#ifdef SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS
+      contains_symbol(props, &__soft_cnt_enable) ||
+#endif
+      (props->start <= RR_PAGE_ADDR && RR_PAGE_ADDR < props->end) ||
+      strcmp(name, "[stack]") == 0) {
+    return;
+  }
+
+  struct Unmaps* u = (struct Unmaps*)(size_t)env;
+  u->unmappings[2 * u->nunmappings] = (uintptr_t)props->start;
+  u->unmappings[2 * u->nunmappings + 1] = (uintptr_t)(props->end - props->start);
+  ++u->nunmappings;
+}
 static __attribute__((noinline)) void breakpoint(void) {
   int break_here = 1;
   (void)break_here;
@@ -93,13 +126,18 @@ __asm__("my_syscall:\n\t"
 #endif
 
 int main(void) {
+  int software_counting_presence = my_syscall(RR_rrcall_check_presence, 0, 1, 0, 0, 0, 0);
   FILE* maps_file = fopen("/proc/self/maps", "r");
   int i = 0;
   struct Unmaps u;
   u.nunmappings = 0;
   // Scan and record mappings - we can't mmap over them yet because libc will
   // be gone at some point. After iterate_maps, no C library calls are allowed
-  iterate_maps((size_t)&u, callback, maps_file);
+  if (software_counting_presence > 0) {
+    iterate_maps((size_t)&u, callback_software_counters, maps_file);
+  } else {
+    iterate_maps((size_t)&u, callback, maps_file);
+  }
   for (i = 0; i < u.nunmappings; ++i) {
     const int mmap_syscall =
 #ifdef __i386__
@@ -125,16 +163,25 @@ int main(void) {
 
   my_syscall(RR_mprotect, RR_THREAD_LOCALS_PAGE_ADDR, 4096,
              PROT_READ | PROT_WRITE, 0, 0, 0);
-  *((uint64_t*)RR_THREAD_LOCALS_PAGE_ADDR) = RR_PAGE_ADDR;
-  my_syscall(RR_mprotect, RR_THREAD_LOCALS_PAGE_ADDR, 4096, PROT_NONE, 0, 0, 0);
+
+  // Software counters always needs rr thread locals to be writable and readable
+  if (software_counting_presence <= 0) {
+    *((uint64_t*)RR_THREAD_LOCALS_PAGE_ADDR) = RR_PAGE_ADDR;
+    my_syscall(RR_mprotect, RR_THREAD_LOCALS_PAGE_ADDR, 4096, PROT_NONE, 0, 0, 0);
+  }
 
   breakpoint();
 
-  my_syscall(RR_mprotect, RR_THREAD_LOCALS_PAGE_ADDR, 4096, PROT_READ, 0, 0, 0);
-  int ret =
-      (*((uint64_t*)RR_THREAD_LOCALS_PAGE_ADDR) == RR_PAGE_ADDR) ? 0 : -42;
+  // Software counters always needs rr thread locals to be writable and readable
+  if (software_counting_presence > 0) {
+    my_syscall(RR_exit, 0, 0, 0, 0, 0, 0);
+  } else {
+    my_syscall(RR_mprotect, RR_THREAD_LOCALS_PAGE_ADDR, 4096, PROT_READ, 0, 0, 0);
+    int ret =
+        (*((uint64_t*)RR_THREAD_LOCALS_PAGE_ADDR) == RR_PAGE_ADDR) ? 0 : -42;
 
-  my_syscall(RR_exit, ret, 0, 0, 0, 0, 0);
+    my_syscall(RR_exit, ret, 0, 0, 0, 0, 0);
+  }
   // Never reached, but make compiler happy.
   return 1;
 }

@@ -4,7 +4,10 @@ ARCH := $(shell uname -m)
 INSTALL_PATH = $(HOME)
 
 ifeq ($(ARCH),aarch64)
-    $(error aarch64 not supported in this version of the gcc plugin)
+	# Check if instrumentation can cope with branch-protection=standard and no-omit-leaf-frame-pointer
+	# fedora glibc in particular is compiled with this
+	# no-omit-leaf-frame-pointer is not available on gcc x86_64 as of this comment
+	CXXFLAGS+= -march=armv8-a+lse -mbranch-protection=standard -mno-omit-leaf-frame-pointer
 endif
 
 ifeq ($(ARCH),x86_64)

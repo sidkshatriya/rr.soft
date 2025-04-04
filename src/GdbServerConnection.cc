@@ -105,7 +105,8 @@ static uint32_t get_cpu_features(SupportedArch arch) {
       break;
     }
     case aarch64:
-      cpu_features = GdbServerConnection::CPU_AARCH64;
+      // TODO detect this
+      cpu_features = GdbServerConnection::CPU_AARCH64 | GdbServerConnection::CPU_AARCH64_PAUTH | GdbServerConnection::CPU_AARCH64_FPU;
       break;
     default:
       FATAL() << "Unknown architecture";

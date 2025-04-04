@@ -752,7 +752,9 @@ public:
     CPU_AVX = 1 << 1,
     CPU_AARCH64 = 1 << 2,
     CPU_PKU = 1 << 3,
-    CPU_AVX512 = 1 << 4
+    CPU_AVX512 = 1 << 4,
+    CPU_AARCH64_PAUTH = 1 << 5,
+    CPU_AARCH64_FPU = 1 << 6
   };
 
   void set_cpu_features(SupportedArch arch);

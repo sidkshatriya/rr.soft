@@ -7,7 +7,8 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wunused-variable")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wunused-variable")
 
 if (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
-  message(FATAL_ERROR "This version of the SoftwareCounters clang plugin does NOT support aarch64")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a+lse -mno-outline-atomics")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8-a+lse -mno-outline-atomics")
 endif()
 
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})

@@ -320,7 +320,10 @@ enum GdbServerRegister {
   DREG_FPSR,
   DREG_FPCR,
 
-  DREG_NUM_LINUX_AARCH64 = DREG_FPCR + 1,
+  DREG_PAUTH_DMASK,
+  DREG_PAUTH_CMASK,
+
+  DREG_NUM_LINUX_AARCH64 = DREG_PAUTH_CMASK + 1,
 };
 
 } // namespace rr

@@ -20,9 +20,7 @@ plugin with gcc 14 then use the plugin with `gcc` 14 only (and so forth).
 See https://github.com/sidkshatriya/rr.soft/wiki for further details on
 how to build and use this plugin
 
-**This release only supports Linux x86-64**.
-
-Support for aarch64 exists, but it has not been publicly released.
+**This release supports Linux x86-64 and Linux aarch64**.
 
 ## Usage
 

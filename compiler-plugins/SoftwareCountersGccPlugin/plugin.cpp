@@ -32,6 +32,82 @@
 
 using namespace std;
 
+/* TODO: Cross platform compilation support */
+
+const uint32_t AddrTicksHI_aarch64 = RR_AARCH64_CUSTOM_TICKS_ADDR >> 16;
+const uint32_t AddrTicksLO_aarch64 = RR_AARCH64_CUSTOM_TICKS_ADDR & 0xFFFF;
+
+const uint32_t AddrTicksReachedBreakHI_aarch64 =
+    RR_AARCH64_CUSTOM_TARGET_REACHED_BREAK_ADDR >> 16;
+const uint32_t AddrTicksReachedBreakLO_aarch64 =
+    RR_AARCH64_CUSTOM_TARGET_REACHED_BREAK_ADDR & 0xFFFF;
+
+#define aarch64_instrumentation_string                                         \
+  std::format("2: ldr w17, [%0]\n" \
+      "cmp w17, #0x1\n" \
+      "b.lt 4f\n" \
+      /* Note: Ensure that w8 always remains 1 though this inline asm */ \
+      "mov	w8, #0x1\n" \
+      "mov	w17, #{}\n" \
+      "movk	w17, #{}, lsl #16\n" \
+      "mov	x1, #0x0123\n" \
+      "movk	x1, #0x4567, lsl #16\n" \
+      "movk	x1, #0x89AB, lsl #32\n" \
+      "movk	x1, #0xCDEF, lsl #48\n" \
+      /* with x1 now fully loaded with some sentinel value as of above */ \
+      /* instruction, the critical section has begun */ \
+      "ldadd	x8, x16, [x17]\n" \
+      /* Here the important assumption is that */ \
+      /* ticks target is stored just after ticks */ \
+      "ldp	x16, x17, [x17]\n" \
+      "cmp	x16, x17\n" \
+      "b.lt	3f\n" \
+      "mov	w16, #{}\n" \
+      "movk	w16, #{}, lsl #16\n" \
+      /* *AddrTicksReachBreak = 1 */ \
+      "swp	w8, wzr, [x16]\n" \
+      /* Trap to the ptracer */ \
+      "brk	#0\n" \
+      "3: mov	w16, #0x0\n" \
+      "mov	w17, #0x0\n" \
+      "msr	nzcv, xzr\n" \
+      /* Critical section ends after mov completes */ \
+      "mov	x1, xzr\n" \
+      /* can't do `ret` here because -mno-omit-leaf-frame-pointer might be in effect */ \
+      "b 6f\n" \
+      "4:\n" \
+      "mov w8, 0x80000000\n" \
+      "cmp w8, w17\n" \
+      "b.eq 5f\n" \
+      /* can't do `ret` here because -mno-omit-leaf-frame-pointer might be in effect */ \
+      "b 6f\n" \
+      "5: mov w8, #0x3f0\n" \
+      "mov x0, 0\n" \
+      /* Need to set all syscall parameters to 0 (except x1) otherwise the */ \
+      /* syscall SYS_rrcall_check_presence returns -EINVAL. Set syscall arg2 */ \
+      /* to 1 to check if running under rr in software counters mode */ \
+      "mov x1, 1\n" \
+      "mov x2, 0\n" \
+      "mov x3, 0\n" \
+      "mov x4, 0\n" \
+      "mov x5, 0\n" \
+      /* Doing `b 1f; mov x8, 0xdc` makes this an unpatcheablei */ \
+      /* syscall. See Monkeypatcher::try_patch_syscall_aarch64(). */ \
+      /* Do this to decrease interference while recording. */ \
+      /* These two instructions otherwise don't change the */ \
+      /* meaning of the program */ \
+      "b 1f\n" \
+      "mov x8, 0xdc\n" \
+      "1: svc #0x0\n" \
+      "str w0, [%0]\n" \
+      "b 2b\n" \
+      "6:\n", \
+      AddrTicksLO_aarch64, \
+      AddrTicksHI_aarch64, \
+      AddrTicksReachedBreakLO_aarch64, \
+      AddrTicksReachedBreakHI_aarch64 \
+      )
+
 #define DO_SOFTWARE_COUNT "__do_software_count"
 #define SOFT_CNT_ENABLE "__soft_cnt_enable"
 
@@ -231,6 +307,57 @@ static void insert_module_functions() {
       build_tree_list(NULL_TREE, build_string(strlen("memory"), "memory")));
 
   auto asm_stmt = gimple_build_asm_vec(X8664_instrumentation_string.c_str(),
+                                       inputs, NULL, clobbers, NULL);
+#elif defined(__aarch64__)
+  /* Unfortunately this attribute does NOT override
+   * -mno-omit-leaf-frame-pointer
+   */
+  // DECL_ATTRIBUTES(do_software_count_fn) =
+  //     tree_cons(get_identifier("omit-leaf-frame-pointer"), NULL_TREE,
+  //               DECL_ATTRIBUTES(do_software_count_fn));
+
+  /* Unfortunately this attribute does NOT override
+   * -mno-omit-leaf-frame-pointer
+   */
+  // DECL_ATTRIBUTES(do_software_count_fn) =
+  //     tree_cons(get_identifier("branch_protection"),
+  //     get_identifier("none"),
+  //               DECL_ATTRIBUTES(do_software_count_fn));
+
+  vec_safe_push(inputs,
+                build_tree_list(
+                    build_tree_list(NULL_TREE, build_string(strlen("r"), "r")),
+                    build_fold_addr_expr(soft_cnt_enable_var)));
+  vec<tree, va_gc> *clobbers = NULL;
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("cc"), "cc")));
+  vec_safe_push(
+      clobbers,
+      build_tree_list(NULL_TREE, build_string(strlen("memory"), "memory")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x0"), "x0")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x1"), "x1")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x2"), "x2")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x3"), "x3")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x4"), "x4")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x5"), "x5")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x6"), "x6")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x7"), "x7")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x8"), "x8")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x16"), "x16")));
+  vec_safe_push(clobbers,
+                build_tree_list(NULL_TREE, build_string(strlen("x17"), "x17")));
+
+  auto asm_stmt = gimple_build_asm_vec(aarch64_instrumentation_string.c_str(),
                                        inputs, NULL, clobbers, NULL);
 #else
 #error Platform not supported
