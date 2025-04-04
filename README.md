@@ -7,7 +7,8 @@ needing access to CPU Hardware Performance counters.
 [Upstream](https://github.com/rr-debugger/rr.git) `rr` requires access
 to CPU HW performance counters to function.
 
-This is a new feature provided to `rr`.
+This is a new feature provided to `rr`. **You can now run rr in your Linux VMs
+running on apple silicon macOS for example !**
 
 Access to CPU Hardware Performance counters is usually not permitted in cloud VMs and containers
 due to security reasons. Even if CPU HW Performance counters are available, sometimes they may be 
