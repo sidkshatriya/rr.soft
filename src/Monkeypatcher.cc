@@ -693,13 +693,14 @@ static Monkeypatcher::JumpStubArea* get_or_create_in_range_stub_area(
   const uint32_t non_guard_space = required_space - 2 * page_size();
   const auto map_addr = t.vm()->mapping_of(cond_jump_from_addr).map.start();
 
+  // Find free space before the patch site.
+  const remote_ptr<void> free_mem_before =
+      t.vm()->find_free_memory_before(&t, required_space, map_addr);
+
   remote_ptr<uint8_t> map_start;
-  // Find free space after the patch site.
-  const remote_ptr<void> free_mem_after =
-      t.vm()->find_free_memory(&t, required_space, map_addr);
-  if (free_mem_after) {
+  if (free_mem_before) {
     // skip the initial page, its a guard
-    map_start = (free_mem_after + page_size()).cast<uint8_t>();
+    map_start = (free_mem_before + page_size()).cast<uint8_t>();
     const uint64_t stub_landing_addr =
         map_start.as_int() + SC_MMAP_FIRST_STUB_START_OFFSET;
     const uint64_t stub_area_end = map_start.as_int() + non_guard_space;
@@ -707,12 +708,48 @@ static Monkeypatcher::JumpStubArea* get_or_create_in_range_stub_area(
                      cond_jump_actual_delta, stub_area_end, stub_size_bytes,
                      from_stub_jump_back_to_next_instr_imm,
                      from_stub_jump_back_to_orig_jump_target_instr_imm)) {
+      // Find free space after the patch site.
+      const remote_ptr<void> free_mem_after =
+          t.vm()->find_free_memory(&t, required_space, map_addr);
+      if (free_mem_after) {
+        // skip the initial page, its a guard
+        map_start = (free_mem_after + page_size()).cast<uint8_t>();
+        const uint64_t stub_landing_addr =
+            map_start.as_int() + SC_MMAP_FIRST_STUB_START_OFFSET;
+        const uint64_t stub_area_end = map_start.as_int() + non_guard_space;
+        if (!jump_doable(arch, stub_landing_addr, cond_jump_from_addr.as_int(),
+                         cond_jump_actual_delta, stub_area_end, stub_size_bytes,
+                         from_stub_jump_back_to_next_instr_imm,
+                         from_stub_jump_back_to_orig_jump_target_instr_imm)) {
+          could_not_find_nearby_mem_for_stub_area(t, map_addr);
+          return nullptr;
+        }
+      } else {
+        could_not_find_nearby_mem_for_stub_area(t, map_addr);
+        return nullptr;
+      }
+    }
+  } else {
+    // Find free space after the patch site.
+    const remote_ptr<void> free_mem_after =
+        t.vm()->find_free_memory(&t, required_space, map_addr);
+    if (free_mem_after) {
+      // skip the initial page, its a guard
+      map_start = (free_mem_after + page_size()).cast<uint8_t>();
+      const uint64_t stub_landing_addr =
+          map_start.as_int() + SC_MMAP_FIRST_STUB_START_OFFSET;
+      const uint64_t stub_area_end = map_start.as_int() + non_guard_space;
+      if (!jump_doable(arch, stub_landing_addr, cond_jump_from_addr.as_int(),
+                       cond_jump_actual_delta, stub_area_end, stub_size_bytes,
+                       from_stub_jump_back_to_next_instr_imm,
+                       from_stub_jump_back_to_orig_jump_target_instr_imm)) {
+        could_not_find_nearby_mem_for_stub_area(t, map_addr);
+        return nullptr;
+      }
+    } else {
       could_not_find_nearby_mem_for_stub_area(t, map_addr);
       return nullptr;
     }
-  } else {
-    could_not_find_nearby_mem_for_stub_area(t, map_addr);
-    return nullptr;
   }
 
   const bool ret = t.vm()->map_software_counter_jump_stub_area(t, map_start,
