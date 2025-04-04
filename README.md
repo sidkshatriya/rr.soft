@@ -98,11 +98,9 @@ for details on how to invoke the plugins.
 
 ## Platform & Linux distribution support
 
-Only x86-64 is supported for software counters record/replay. 32-bit
-x86 is not planned to be supported, even in the future.
+aarch64 and x86-64 is supported for software counters record/replay.
 
-**Software Counters mode aarch64 support exists but the code is currently
-not public**. Watch this space for more information.
+32-bit x86 is not planned to be supported, even in the future.
 
 Currently the following distributions are supported:
 - Fedora 40, 41
