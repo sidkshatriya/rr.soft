@@ -103,6 +103,25 @@
 
 using namespace std;
 
+#ifndef HAVE_TERMIOS2
+// The kernel header that defines this conflicts badly with glibc headers
+// (but not bionic, which does define this) so we define it ourselves.
+// NB: We need this struct defined so that the preprocessor macro for
+// TCGETS2 will evaluate. But we use IOCTL_MASK_SIZE on it and we use
+// the size from the tracee to determine how many bytes to record, so
+// we don't actually depend on this being *accurate*.
+struct termios2 {
+  tcflag_t c_iflag;
+  tcflag_t c_oflag;
+  tcflag_t c_cflag;
+  tcflag_t c_lflag;
+  cc_t c_line;
+  cc_t c_cc[19];
+  speed_t c_ispeed;
+  speed_t c_ospeed;
+};
+#endif
+
 namespace rr {
 
 union _semun {
@@ -1643,6 +1662,7 @@ static Switchable prepare_ioctl(RecordTask* t,
    * conventions.  Special case them here. */
   switch (request) {
     case 0xc020462a: // Nvidia driver ioctl
+    case 0xc0181b01: // RDMA ioctl
       syscall_state.emulate_result(-ENOTTY);
       return PREVENT_SWITCH;
 
@@ -1943,6 +1963,7 @@ static Switchable prepare_ioctl(RecordTask* t,
       case IOCTL_MASK_SIZE(TUNSETIFINDEX):
       case IOCTL_MASK_SIZE(TUNSETVNETLE):
       case IOCTL_MASK_SIZE(TUNSETVNETBE):
+      case IOCTL_MASK_SIZE(TCSETS2):
         return PREVENT_SWITCH;
       case IOCTL_MASK_SIZE(USBDEVFS_GETDRIVER):
         // Reads and writes its parameter despite not having the _IOC_READ bit.
@@ -2078,6 +2099,7 @@ static Switchable prepare_ioctl(RecordTask* t,
     case IOCTL_MASK_SIZE(OTPGETREGIONINFO):
     case IOCTL_MASK_SIZE(ECCGETLAYOUT):
     case IOCTL_MASK_SIZE(ECCGETSTATS):
+    case IOCTL_MASK_SIZE(TCGETS2):
       syscall_state.reg_parameter(3, size);
       return PREVENT_SWITCH;
 

@@ -480,6 +480,15 @@ else()
   message(AUTHOR_WARNING "backtrace(3) not present in execinfo.h. Automatic backtraces for failures in rr are disabled.")
 endif()
 
+include(CheckTypeSize)
+set(SAVE_CMAKE_EXTRA_INCLUDE_FILES "${CMAKE_EXTRA_INCLUDE_FILES}")
+list(APPEND CMAKE_EXTRA_INCLUDE_FILES "termios.h")
+check_type_size("struct termios2" SIZEOF_TERMIOS2)
+if(HAVE_SIZEOF_TERMIOS2)
+  add_definitions(-DHAVE_TERMIOS2)
+endif()
+set(CMAKE_EXTRA_INCLUDE_FILES "${SAVE_CMAKE_EXTRA_INCLUDE_FILES}")
+
 # Test only symbols
 check_symbol_exists(pthread_mutexattr_setrobust "pthread.h" HAVE_ROBUST_MUTEX)
 
@@ -1097,6 +1106,7 @@ set(BASIC_TESTS
   bpf_query
   brk
   brk2
+  arm/brk_nonzero
   capget
   chew_cpu
   x86/chew_cpu_cpuid
