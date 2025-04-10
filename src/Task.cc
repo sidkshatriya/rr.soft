@@ -5152,6 +5152,8 @@ bool maybe_move_out_of_dynamic_software_counter_stub_arch<ARM64Arch>(Task &t) {
 
   const remote_ptr<uint32_t> addr = r.ip().to_data_ptr<uint32_t>();
   const uint32_t instr = t.read_mem(addr);
+  bool ok = true;
+  const uint32_t next_instr = t.read_mem(addr + 1, &ok);
 
   //  0 0xa9bf23e1 stp	x1, x8, [sp, #-16]!
   //  4 0xa9bf47f0 stp	x16, x17, [sp, #-16]!
@@ -5322,7 +5324,9 @@ bool maybe_move_out_of_dynamic_software_counter_stub_arch<ARM64Arch>(Task &t) {
       ip_cond_br = r.ip().to_data_ptr<uint32_t>() + 6;
     }
     // 36 0x5400004b b.lt	#8
-    else if (instr == 0x5400004b) {
+    // This could be confused as a conditional branch extracted from user code
+    // so check if there is a brk #0 right after this
+    else if (instr == 0x5400004b && ok && next_instr == 0xd4200000) {
       LOG(debug) << "in dynamic software counter stub " << r.ip()
                  << " 0x5400004b b.lt	#8";
       x8 = t.read_mem(r.sp().cast<uint64_t>() + 3);
