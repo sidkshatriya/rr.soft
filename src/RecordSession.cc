@@ -3067,7 +3067,6 @@ size_t db_write_arch<X64Arch>(
     }
     // Batch writes to hopefully speed things up
     rocksdb::WriteBatch batch;
-    bool abandon_batch = false;
 
     uint64_t elf_addr = s.sh_addr;
     uint64_t file_offset = s.sh_offset;
@@ -3157,10 +3156,8 @@ size_t db_write_arch<X64Arch>(
       ASSERT(&t, buf_len >= buf_offset);
     }
 
-    if (!abandon_batch) {
-      status = db.Write(default_write_options, &batch);
-      ASSERT(&t, status.ok()) << "could not Write to db";
-    }
+    status = db.Write(default_write_options, &batch);
+    ASSERT(&t, status.ok()) << "could not Write to db";
   }
 
   LOG(info) << "found: " << insns_found
