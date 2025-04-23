@@ -2623,33 +2623,12 @@ void Monkeypatcher::software_counter_instrument_after_mmap(
 
   auto it = t.session().patchdb_map.find(unique_id);
   if (it == t.session().patchdb_map.end()) {
-    // Check for symbols first in the library itself, regardless of whether
-    // there is a debuglink.  For example, on Fedora 26, the .symtab and
-    // .strtab sections are stripped from the debuginfo file for
-    // libpthread.so.
+    // Can now do without symbols on x86-64 and aarch64.
+    //
+    // However need this for for now to check if executable has already been statically
+    // instrumented (will need to hunt for __do_software_count)
+    // TODO: Better way to mark an executable as statically instrumented
     SymbolTable syms = reader.read_symbols(".symtab", ".strtab");
-    if (syms.size() == 0) {
-      ScopedFd debug_fd = reader.open_debug_file(map.map.fsname());
-      if (debug_fd.is_open()) {
-        ElfFileReader debug_reader(debug_fd, t.arch());
-        syms = debug_reader.read_symbols(".symtab", ".strtab");
-      }
-    }
-
-    if (syms.size()) {
-      LOG(debug) << syms.size()
-                 << " symbols available for: " << map.map.fsname();
-    } else {
-      // Even if syms.size() is 0, might still want instrument without symbols
-      // in the future, either on the fly via SIGSEGV or now (FEATURE
-      // UNIMPLEMENTED)
-      //
-      // XXX: This might be only practical on aarch64 as on x64 could be
-      // difficult to do disassembly without symbols and the danger of
-      // accidently disassembling data embedded in code !?? Then again
-      // it's probably not fully safe on aarch64 also ??
-      return;
-    }
     t.session().get_or_create_db_of_patch_locations(t, map.map.fsname(), reader,
                                                     syms, unique_id);
   }

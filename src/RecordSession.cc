@@ -2977,7 +2977,7 @@ string patch_loc_db_save_dir() {
 
 template <typename Arch>
 static size_t db_write_arch(const RecordTask& t, const string&, const string&,
-                            ElfFileReader&, const SymbolTable&, rocksdb::DB&,
+                            ElfFileReader&, rocksdb::DB&,
                             const rocksdb::WriteOptions) {
   ASSERT(&t, false) << "Architecture not supported. enum SupportedArch value: "
                     << t.arch();
@@ -2987,46 +2987,49 @@ static size_t db_write_arch(const RecordTask& t, const string&, const string&,
 template <>
 size_t db_write_arch<ARM64Arch>(
     const RecordTask& t, const string& unique_id, const string& fsname,
-    ElfFileReader& reader, const SymbolTable& syms, rocksdb::DB& db,
+    ElfFileReader& reader, rocksdb::DB& db,
     const rocksdb::WriteOptions default_write_options) {
   rocksdb::Status status;
-  const size_t len = syms.size();
   size_t insns_found = 0;
-  for (size_t i = 0; i < len; i++) {
-    if (!syms.symbol_size(i) || syms.symbol_type(i) != STT_FUNC) {
+  SectionDetails s{};
+  for (size_t i = 0; reader.sectionheader_i(i, s); i++) {
+    if (s.sh_type != SHT_PROGBITS) {
+      continue;
+    }
+    // dont know how to deal with compressed sections yet
+    if (s.sh_flags & SHF_COMPRESSED) {
+      continue;
+    }
+    // Should be allocatable, executable and NOT writeable
+    if (!(s.sh_flags & SHF_ALLOC) || !(s.sh_flags & SHF_EXECINSTR) ||
+        (s.sh_flags & SHF_WRITE)) {
       continue;
     }
     // Batch writes to hopefully speed things up
     rocksdb::WriteBatch batch;
-    bool abandon_batch = false;
 
-    uint64_t start_addr = syms.addr(i);
-    uint64_t end_addr = syms.addr(i) + syms.symbol_size(i);
-    for (uint64_t elf_addr = start_addr; elf_addr < end_addr;
-         elf_addr += sizeof(uint32_t)) {
-      uintptr_t file_offset = 0;
-      if (!reader.addr_to_offset(elf_addr, file_offset)) {
-        LOG(warn) << "ELF address " << HEX(elf_addr) << " not in file";
-        continue;
-      }
-      uint32_t insn = 0;
-      ASSERT(&t, reader.read_into(file_offset, &insn))
-          << "could not read instruction from elf file";
-      if (is_conditional_branch_aarch64(insn)) {
+    uint64_t elf_addr = s.sh_addr;
+    uint64_t file_offset = s.sh_offset;
+    const uint8_t* buf_pointer =
+        static_cast<const uint8_t*>(reader.read_bytes(file_offset, s.sh_size));
+    ASSERT(&t, buf_pointer) << "Could not read instructions for section: " << i;
+
+    const uint32_t* start_addr = (uint32_t*)buf_pointer;
+    const uint32_t* end_addr = (uint32_t*)(buf_pointer + s.sh_size);
+    for (const uint32_t* insn_ptr = start_addr; insn_ptr < end_addr;
+         insn_ptr += 1) {
+      if (is_conditional_branch_aarch64(*insn_ptr)) {
         insns_found++;
         status = batch.Put(
             rocksdb::Slice((const char*)&file_offset, sizeof(uint64_t)),
             rocksdb::Slice((const char*)&elf_addr, sizeof(uint64_t)));
         ASSERT(&t, status.ok()) << "could not Put batch";
-      } else if (is_exclusive_load_aarch64(insn)) {
-        abandon_batch = true;
-        break;
       }
+      file_offset += sizeof(uint32_t);
+      elf_addr += sizeof(uint32_t);
     }
-    if (!abandon_batch) {
-      status = db.Write(default_write_options, &batch);
-      ASSERT(&t, status.ok()) << "could not Write to db";
-    }
+    status = db.Write(default_write_options, &batch);
+    ASSERT(&t, status.ok()) << "could not Write to db";
   }
 
   LOG(info) << "found: " << insns_found
@@ -3040,35 +3043,39 @@ size_t db_write_arch<ARM64Arch>(
 template <>
 size_t db_write_arch<X64Arch>(
     const RecordTask& t, const string& unique_id, const string& fsname,
-    ElfFileReader& reader, const SymbolTable& syms, rocksdb::DB& db,
+    ElfFileReader& reader, rocksdb::DB& db,
     const rocksdb::WriteOptions default_write_options) {
   ZydisDecoder dissassembler;
   ZydisDecoderInit(&dissassembler, ZYDIS_MACHINE_MODE_LONG_64,
                    ZYDIS_STACK_WIDTH_64);
   rocksdb::Status status;
-  const size_t len = syms.size();
   size_t insns_found = 0;
   vector<char> slice;
-  for (size_t i = 0; i < len; i++) {
-    if (!syms.symbol_size(i) || syms.symbol_type(i) != STT_FUNC) {
+  SectionDetails s{};
+  for (size_t i = 0; reader.sectionheader_i(i, s); i++) {
+    if (s.sh_type != SHT_PROGBITS) {
+      continue;
+    }
+    // dont know how to deal with compressed sections yet
+    if (s.sh_flags & SHF_COMPRESSED) {
+      continue;
+    }
+    // Should be allocatable, executable and NOT writeable
+    if (!(s.sh_flags & SHF_ALLOC) || !(s.sh_flags & SHF_EXECINSTR) ||
+        (s.sh_flags & SHF_WRITE)) {
       continue;
     }
     // Batch writes to hopefully speed things up
     rocksdb::WriteBatch batch;
-    bool abandon_batch = false;
 
-    uint64_t elf_addr = syms.addr(i);
-    uintptr_t file_offset = 0;
-    if (!reader.addr_to_offset(elf_addr, file_offset)) {
-      LOG(warn) << "ELF address " << HEX(elf_addr) << " not in file";
-      continue;
-    }
-    const uint8_t* buf_pointer = static_cast<const uint8_t*>(
-        reader.read_bytes(file_offset, syms.symbol_size(i)));
+    uint64_t elf_addr = s.sh_addr;
+    uint64_t file_offset = s.sh_offset;
+    const uint8_t* buf_pointer =
+        static_cast<const uint8_t*>(reader.read_bytes(file_offset, s.sh_size));
     ASSERT(&t, buf_pointer)
-        << "Could not read instructions for symbol: " << syms.name(i);
+        << "Could not read instructions for section: " << i;
 
-    const ZyanUSize buf_len = syms.symbol_size(i);
+    const ZyanUSize buf_len = s.sh_size;
     ZyanUSize buf_offset = 0;
 
     ZyanU64 cur_elf_addr = elf_addr;
@@ -3149,10 +3156,8 @@ size_t db_write_arch<X64Arch>(
       ASSERT(&t, buf_len >= buf_offset);
     }
 
-    if (!abandon_batch) {
-      status = db.Write(default_write_options, &batch);
-      ASSERT(&t, status.ok()) << "could not Write to db";
-    }
+    status = db.Write(default_write_options, &batch);
+    ASSERT(&t, status.ok()) << "could not Write to db";
   }
 
   LOG(info) << "found: " << insns_found
@@ -3165,10 +3170,10 @@ size_t db_write_arch<X64Arch>(
 
 static size_t db_write(const RecordTask& t, const string& unique_id,
                        const string& fsname, ElfFileReader& reader,
-                       const SymbolTable& syms, rocksdb::DB& db,
+                       rocksdb::DB& db,
                        const rocksdb::WriteOptions default_write_options) {
-  RR_ARCH_FUNCTION(db_write_arch, t.arch(), t, unique_id, fsname, reader, syms,
-                   db, default_write_options);
+  RR_ARCH_FUNCTION(db_write_arch, t.arch(), t, unique_id, fsname, reader, db,
+                   default_write_options);
 }
 
 // Assumes build_id is not an empty string, otherwise ASSERTs
@@ -3281,8 +3286,8 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
 
     size_t insns_found = 0;
     if (!already_statically_instrumented) {
-      insns_found = db_write(t, unique_id, fsname, reader, syms, *db,
-                             default_write_options);
+      insns_found =
+          db_write(t, unique_id, fsname, reader, *db, default_write_options);
     }
 
     if (already_statically_instrumented) {
