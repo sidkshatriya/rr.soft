@@ -3007,35 +3007,29 @@ size_t db_write_arch<ARM64Arch>(
     }
     // Batch writes to hopefully speed things up
     rocksdb::WriteBatch batch;
-    bool abandon_batch = false;
 
-    uint64_t start_addr = s.sh_addr;
-    uint64_t end_addr = s.sh_addr + s.sh_size;
-    for (uint64_t elf_addr = start_addr; elf_addr < end_addr;
-         elf_addr += sizeof(uint32_t)) {
-      uintptr_t file_offset = 0;
-      if (!reader.addr_to_offset(elf_addr, file_offset)) {
-        LOG(warn) << "ELF address " << HEX(elf_addr) << " not in file";
-        continue;
-      }
-      uint32_t insn = 0;
-      ASSERT(&t, reader.read_into(file_offset, &insn))
-          << "could not read instruction from elf file";
-      if (is_conditional_branch_aarch64(insn)) {
+    uint64_t elf_addr = s.sh_addr;
+    uint64_t file_offset = s.sh_offset;
+    const uint8_t* buf_pointer =
+        static_cast<const uint8_t*>(reader.read_bytes(file_offset, s.sh_size));
+    ASSERT(&t, buf_pointer) << "Could not read instructions for section: " << i;
+
+    const uint32_t* start_addr = (uint32_t*)buf_pointer;
+    const uint32_t* end_addr = (uint32_t*)(buf_pointer + s.sh_size);
+    for (const uint32_t* insn_ptr = start_addr; insn_ptr < end_addr;
+         insn_ptr += 1) {
+      if (is_conditional_branch_aarch64(*insn_ptr)) {
         insns_found++;
         status = batch.Put(
             rocksdb::Slice((const char*)&file_offset, sizeof(uint64_t)),
             rocksdb::Slice((const char*)&elf_addr, sizeof(uint64_t)));
         ASSERT(&t, status.ok()) << "could not Put batch";
-      } else if (is_exclusive_load_aarch64(insn)) {
-        abandon_batch = true;
-        break;
       }
+      file_offset += sizeof(uint32_t);
+      elf_addr += sizeof(uint32_t);
     }
-    if (!abandon_batch) {
-      status = db.Write(default_write_options, &batch);
-      ASSERT(&t, status.ok()) << "could not Write to db";
-    }
+    status = db.Write(default_write_options, &batch);
+    ASSERT(&t, status.ok()) << "could not Write to db";
   }
 
   LOG(info) << "found: " << insns_found
