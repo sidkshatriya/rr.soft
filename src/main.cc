@@ -175,16 +175,6 @@ bool parse_global_option(std::vector<std::string>& args) {
     case 'W':
 #if defined(__aarch64__) || defined(__x86_64__)
       LOG(info) << "Using software counters mode";
-      {
-        char *env_var = getenv("DEBUGINFOD_URLS");
-        if (env_var == NULL || strlen(env_var) == 0) {
-          LOG(error)
-              << "Environment variable `DEBUGINFOD_URLS` is not "
-                 "defined or is empty. Record/replay in software counters mode "
-                 "likely to be problematic";
-        }
-      }
-
       flags.software_counters = true;
       flags.forced_uarch = "Software";
 #else
