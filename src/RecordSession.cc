@@ -3040,35 +3040,40 @@ size_t db_write_arch<ARM64Arch>(
 template <>
 size_t db_write_arch<X64Arch>(
     const RecordTask& t, const string& unique_id, const string& fsname,
-    ElfFileReader& reader, const SymbolTable& syms, rocksdb::DB& db,
+    ElfFileReader& reader, const SymbolTable& _, rocksdb::DB& db,
     const rocksdb::WriteOptions default_write_options) {
   ZydisDecoder dissassembler;
   ZydisDecoderInit(&dissassembler, ZYDIS_MACHINE_MODE_LONG_64,
                    ZYDIS_STACK_WIDTH_64);
   rocksdb::Status status;
-  const size_t len = syms.size();
   size_t insns_found = 0;
   vector<char> slice;
-  for (size_t i = 0; i < len; i++) {
-    if (!syms.symbol_size(i) || syms.symbol_type(i) != STT_FUNC) {
+  SectionDetails s{};
+  for (size_t i = 0; reader.sectionheader_i(i, s); i++) {
+    if (s.sh_type != SHT_PROGBITS) {
+      continue;
+    }
+    // dont know how to deal with compressed sections yet
+    if (s.sh_flags & SHF_COMPRESSED) {
+      continue;
+    }
+    // Should be allocatable, executable and NOT writeable
+    if (!(s.sh_flags & SHF_ALLOC) || !(s.sh_flags & SHF_EXECINSTR) ||
+        (s.sh_flags & SHF_WRITE)) {
       continue;
     }
     // Batch writes to hopefully speed things up
     rocksdb::WriteBatch batch;
     bool abandon_batch = false;
 
-    uint64_t elf_addr = syms.addr(i);
-    uintptr_t file_offset = 0;
-    if (!reader.addr_to_offset(elf_addr, file_offset)) {
-      LOG(warn) << "ELF address " << HEX(elf_addr) << " not in file";
-      continue;
-    }
-    const uint8_t* buf_pointer = static_cast<const uint8_t*>(
-        reader.read_bytes(file_offset, syms.symbol_size(i)));
+    uint64_t elf_addr = s.sh_addr;
+    uint64_t file_offset = s.sh_offset;
+    const uint8_t* buf_pointer =
+        static_cast<const uint8_t*>(reader.read_bytes(file_offset, s.sh_size));
     ASSERT(&t, buf_pointer)
-        << "Could not read instructions for symbol: " << syms.name(i);
+        << "Could not read instructions for section: " << i;
 
-    const ZyanUSize buf_len = syms.symbol_size(i);
+    const ZyanUSize buf_len = s.sh_size;
     ZyanUSize buf_offset = 0;
 
     ZyanU64 cur_elf_addr = elf_addr;
