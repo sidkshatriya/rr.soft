@@ -110,8 +110,8 @@ Currently the following distributions have been tested:
 
 rr.soft should be able to work properly on other distributions too.
 
-If you are using aarch64, please use distributions with Linux kernel >= 6.12
-for best results.
+_If you are using aarch64, please use distributions with Linux kernel version >= 6.12
+for best results._
 
 ### Running Software Counters mode `rr` within a container
 
