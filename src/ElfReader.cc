@@ -36,6 +36,8 @@ public:
   virtual SectionOffsets find_section_file_offsets(const char* name) = 0;
   virtual const vector<uint8_t>* decompress_section(SectionOffsets offsets) = 0;
   bool ok() { return ok_; }
+  virtual bool programheader_i(size_t i, struct PhdrDetails &p) const = 0;
+  virtual bool sectionheader_i(size_t i, struct SectionDetails &s) const = 0;
 
 protected:
   ElfReader& r;
@@ -56,6 +58,8 @@ public:
   virtual bool addr_to_offset(uintptr_t addr, uintptr_t& offset) override;
   virtual SectionOffsets find_section_file_offsets(const char* name) override;
   virtual const vector<uint8_t>* decompress_section(SectionOffsets offsets) override;
+  virtual bool programheader_i(size_t i, PhdrDetails &p) const override;
+  virtual bool sectionheader_i(size_t i, SectionDetails &s) const override;
 
 private:
   const typename Arch::ElfPhdr* find_programheader(uint32_t pt);
@@ -142,6 +146,22 @@ const typename Arch::ElfPhdr* ElfReaderImpl<Arch>::find_programheader(uint32_t p
 }
 
 template <typename Arch>
+bool ElfReaderImpl<Arch>::programheader_i(size_t i,
+                                          struct PhdrDetails& p) const {
+  if (i >= programheader_size) {
+    return false;
+  }
+  auto& phi = programheader[i];
+  p = PhdrDetails{ .p_type = phi.p_type,
+                   .p_flags = phi.p_flags,
+                   .p_offset = phi.p_offset,
+                   .p_filesz = phi.p_filesz,
+                   .p_vaddr = phi.p_vaddr,
+                  };
+  return true;
+}
+
+template <typename Arch>
 const typename Arch::ElfShdr* ElfReaderImpl<Arch>::find_section(const char* n) {
   const typename Arch::ElfShdr* section = nullptr;
 
@@ -165,6 +185,24 @@ const typename Arch::ElfShdr* ElfReaderImpl<Arch>::find_section(const char* n) {
     LOG(debug) << "Missing section " << n;
   }
   return section;
+}
+
+template <typename Arch>
+bool ElfReaderImpl<Arch>::sectionheader_i(size_t i, SectionDetails& sd) const {
+  if (i >= sections_size) {
+    return false;
+  }
+
+  auto& s = sections[i];
+  sd = SectionDetails{
+    .sh_type = s.sh_type,
+    .sh_flags = s.sh_flags,
+    .sh_offset = s.sh_offset,
+    .sh_size = s.sh_size,
+    .sh_addr = s.sh_addr,
+  };
+
+  return true;
 }
 
 template <typename Arch>
@@ -562,6 +600,14 @@ Debugaltlink ElfReader::read_debugaltlink() { return impl().read_debugaltlink();
 
 SectionOffsets ElfReader::find_section_file_offsets(const char* name) {
   return impl().find_section_file_offsets(name);
+}
+
+bool ElfReader::programheader_i(size_t i, PhdrDetails &p) {
+  return impl().programheader_i(i, p);
+}
+
+bool ElfReader::sectionheader_i(size_t i, SectionDetails &s) {
+  return impl().sectionheader_i(i, s);
 }
 
 DwarfSpan ElfReader::dwarf_section(const char* name, bool known_to_be_compressed) {
