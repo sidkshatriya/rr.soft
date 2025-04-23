@@ -103,25 +103,15 @@ aarch64 and x86-64 is supported for software counters record/replay.
 
 32-bit x86 is not planned to be supported, even in the future.
 
-Currently the following distributions are supported:
-- Fedora 40, 41
-- Ubuntu 24.10
+Currently the following distributions have been tested:
+- Fedora 40, 41, 42
+- Ubuntu 24.10, 25.04
 - Debian Unstable
 
-Why so few ? In short the distribution needs *robust*
-[`debuginfod`](https://documentation.ubuntu.com/server/reference/debugging/about-debuginfod/index.html)
-support. See
-[here](https://github.com/sidkshatriya/rr.soft/wiki#how-does-software-counters-mode-rr-work--why-does-it-require-debuginfod-)
-for more detailed information on why `debuginfod` is necessary
+rr.soft should be able to work properly on other distributions too.
 
-> [!important]
-> When you invoke `rr record -W` the recording may occationally appear to "hang".
-> Actually, most probably, it is not a hang: `rr` is most likely trying to download some debugging
-> info from your Linux distribution's `debuginfod` server. This could take some time depending
-> on the speed of your internet connection and the amount of data that needs to be be downloaded.
-> Please be patient, this debugging info is cached and subsequent `rr record -W` of the
-> same program should not experience this "hang". Try to do `rr record -W --log=all:info <program>`
-> or `rr record -W --log=all:debug <program>` to debug the issue if the problem persists.
+If you are using aarch64, please use distributions with Linux kernel >= 6.12
+for best results.
 
 ### Running Software Counters mode `rr` within a container
 
@@ -134,7 +124,7 @@ using something like [podman](https://github.com/containers/podman) or
 
 ```bash
 $ distrobox enter fedora41
-$ distrobox create --image fedora:41 --name fedora41
+$ distrobox create --image fedora:42 --name fedora42
 # Build Software Counters mode rr
 # Run it !
 ```
