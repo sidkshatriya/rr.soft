@@ -13,18 +13,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "locations.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/IR/InlineAsm.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Pass.h"
-#include "llvm/IR/Instructions.h"
+#include <llvm/Pass.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/ADT/StringExtras.h>
+#include <llvm/IR/InlineAsm.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/PassPlugin.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/Instructions.h>
+
 #include <stdlib.h>
+
+#include "locations.h"
 
 using namespace llvm;
 
@@ -40,6 +44,8 @@ auto AddrTicksReachedBreakLO_aarch64 =
 
 #define SOFT_COUNTER_ENABLE_NAME "__soft_cnt_enable"
 
+#define SOFT_COUNTER_NOTE_SECTION_VAR_NAME "__rr_soft_note"
+
 void InsertSoftCounterEnableGlobal(LLVMContext &C, Module &M) {
   IntegerType *Int32Ty = IntegerType::getInt32Ty(C);
   ConstantInt *MinInt32 = ConstantInt::get(Int32Ty, 0x8000'0000);
@@ -50,6 +56,48 @@ void InsertSoftCounterEnableGlobal(LLVMContext &C, Module &M) {
   SoftCounterEnable->setLinkage(GlobalValue::LinkOnceODRLinkage);
   SoftCounterEnable->setVisibility(GlobalValue::HiddenVisibility);
   SoftCounterEnable->setInitializer(MinInt32);
+}
+
+void InsertSoftNoteGlobalVar(LLVMContext &C, Module &M) {
+  IntegerType *Int8Ty = IntegerType::getInt8Ty(C);
+  ArrayType *ArT = ArrayType::get(Int8Ty, 24);
+  auto Zero = ConstantInt::get(Int8Ty, 0);
+  auto One = ConstantInt::get(Int8Ty, 1);
+  auto Eight = ConstantInt::get(Int8Ty, 8);
+  auto R = ConstantInt::get(Int8Ty, 'r');
+  auto Dot = ConstantInt::get(Int8Ty, '.');
+  auto S = ConstantInt::get(Int8Ty, 's');
+  auto O = ConstantInt::get(Int8Ty, 'o');
+  auto F = ConstantInt::get(Int8Ty, 'f');
+  auto T = ConstantInt::get(Int8Ty, 't');
+
+  M.getOrInsertGlobal(SOFT_COUNTER_NOTE_SECTION_VAR_NAME, ArT);
+  GlobalVariable *ArVar =
+      M.getNamedGlobal(SOFT_COUNTER_NOTE_SECTION_VAR_NAME);
+  ArVar->setAlignment(Align(4));
+  ArVar->setConstant(true);
+  ArVar->setSection(".note.rr.soft");
+  ArVar->setVisibility(GlobalValue::HiddenVisibility);
+  ArVar->addAttribute("used");
+  auto comdat = M.getOrInsertComdat("__rr_soft_note");
+  comdat->setSelectionKind(Comdat::SelectionKind::Any);
+  ArVar->setComdat(comdat);
+
+  // See struct Elf64_Nhdr in /usr/include/elf.h
+  SmallVector<Constant*> sv {
+    // n_namesz - name len bytes (NUL is counted) as u32 little endian
+    Eight, Zero, Zero, Zero,
+    // n_descsz - description len bytes as u32 little endian
+    One, Zero, Zero, Zero,
+    // n_type - u32 little endian
+    One, Zero, Zero, Zero,
+    // name - "rr.soft\0"
+    R, R, Dot, S, O, F, T, Zero,
+    // description - 0x01
+    One, Zero, Zero, Zero,
+  };
+  auto aref = ArrayRef(sv);
+  ArVar->setInitializer(ConstantArray::get(ArT, aref));
 }
 
 void InsertCounterFunctionWithDefinitionAArch64(LLVMContext &C, Module &M,
@@ -353,13 +401,13 @@ struct SoftwareCounters : PassInfoMixin<SoftwareCounters> {
     }
 
     if (InstrumentedAFunction) {
+      InsertSoftNoteGlobalVar(C, M);
+      InsertSoftCounterEnableGlobal(C, M);
       // Now insert the software counter function definition that does the
       // counting
       if (is_aarch64) {
-        InsertSoftCounterEnableGlobal(C, M);
         InsertCounterFunctionWithDefinitionAArch64(C, M, DoSoftwareCountCallee);
       } else {
-        InsertSoftCounterEnableGlobal(C, M);
         InsertCounterFunctionWithDefinitionX86_64(C, M, DoSoftwareCountCallee);
       }
     }
