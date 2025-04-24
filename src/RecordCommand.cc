@@ -512,9 +512,11 @@ static bool parse_record_arg(vector<string>& args, RecordFlags& flags) {
         flags.software_counting_strategy = SCS_ALWAYS_JII;
       } else if (opt.value == "minimal") {
         flags.software_counting_strategy = SCS_MINIMAL;
+      } else if (opt.value == "no-dyn-instr") {
+        flags.software_counting_strategy = SCS_NO_DYNAMIC_INSTRUMENTATION;
       } else {
         FATAL() << "Unknown software counting strategy `" << opt.value << "`"
-                << " valid values are `never-jii`, `always-jii`, `minimal`";
+                << " valid values are `never-jii`, `always-jii`, `minimal`, `no-dyn-instr`";
       }
       break;
     case 's':

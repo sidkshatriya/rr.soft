@@ -18,6 +18,10 @@
 namespace rr {
 
 enum SC_Strategy {
+  // No dynamic instrumentation is done at all (whether "all in one go" or
+  // SIGSEGV "just in time"). Just depend on any static instrumentation that
+  // may have been done by the compiler plugins
+  SCS_NO_DYNAMIC_INSTRUMENTATION,
   // Never do just in time software counting dynamic instrumentation
   // i.e. do all the dynamic instrumentation on the map after a mmap / execve
   // Usually the slowest strategy

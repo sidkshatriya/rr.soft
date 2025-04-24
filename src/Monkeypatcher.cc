@@ -2579,10 +2579,13 @@ void Monkeypatcher::software_counter_instrument_after_mmap(
     return;
   }
 
-  if (!file_may_need_software_counter_instrumentation(map)) {
+  if (t.session().software_counting_strategy() == SCS_NO_DYNAMIC_INSTRUMENTATION) {
     return;
   }
 
+  if (!file_may_need_software_counter_instrumentation(map)) {
+    return;
+  }
   // if the SCS_MINIMAL strategy is active, only a select set of shared
   // libraries will be instrumented. If map.map.fsname() is not part of that,
   // immediately return
