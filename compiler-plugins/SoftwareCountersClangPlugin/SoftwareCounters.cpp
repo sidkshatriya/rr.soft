@@ -400,8 +400,11 @@ struct SoftwareCounters : PassInfoMixin<SoftwareCounters> {
       }
     }
 
+    // Even if no function ends up getting instrumented in the module, the code should
+    // not be considered for dynamic instrumentation anymore -- indicate this by adding
+    // a .note.rr.soft ELF section
+    InsertSoftNoteGlobalVar(C, M);
     if (InstrumentedAFunction) {
-      InsertSoftNoteGlobalVar(C, M);
       InsertSoftCounterEnableGlobal(C, M);
       // Now insert the software counter function definition that does the
       // counting
