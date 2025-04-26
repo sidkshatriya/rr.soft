@@ -44,8 +44,6 @@
                   pkgs.python3Packages.pexpect
                   pkgs.gdb
                   pkgs.lldb
-                  (libSoftwareCountersGccFor "14" pkgs.gcc14Stdenv)
-                  (libSoftwareCountersFor "19" pkgs.clang19Stdenv pkgs.llvmPackages_19)
                 ]
                 ++ pkgs.lib.optionals (system == "x86_64-linux") [ pkgs.zydis ]
                 ++ prev.buildInputs;
