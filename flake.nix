@@ -26,7 +26,7 @@
           rr_compiled_with =
             flavor: software_counters_plugin:
             pkgs.rr.overrideAttrs (prev: {
-              version = "post5.9.0+${flavor}-soft";
+              version = "soft-post5.9.0+builtwith${flavor}";
               src = ./.;
               nativeBuildInputs = [
                 pkgs.pkg-config
@@ -44,8 +44,8 @@
                   pkgs.python3Packages.pexpect
                   pkgs.gdb
                   pkgs.lldb
-                  self'.packages.libSoftwareCountersGcc
-                  self'.packages.libSoftwareCounters
+                  (libSoftwareCountersGccFor "14" pkgs.gcc14Stdenv)
+                  (libSoftwareCountersFor "19" pkgs.clang19Stdenv pkgs.llvmPackages_19)
                 ]
                 ++ pkgs.lib.optionals (system == "x86_64-linux") [ pkgs.zydis ]
                 ++ prev.buildInputs;
@@ -91,7 +91,7 @@
           libSoftwareCountersFor =
             ver: clangStdenvArg: llvmPackagesArg:
             clangStdenvArg.mkDerivation {
-              pname = "libSoftwareCounters${ver}";
+              pname = "libSoftwareCountersClang${ver}";
               version = "0.1";
               src = ./.;
               nativeBuildInputs = [
@@ -122,28 +122,26 @@
             };
         in
         {
-          packages.rr-gcc =
+          packages.rr-builtwithgcc =
             (rr_compiled_with "gcc" (libSoftwareCountersGccFor "14" pkgs.gcc14Stdenv)).override
               {
                 stdenv = pkgs.gcc14Stdenv;
               };
-          packages.rr-clang =
+          packages.rr-builtwithclang =
             (rr_compiled_with "clang" (libSoftwareCountersFor "19" pkgs.clang19Stdenv pkgs.llvmPackages_19))
             .override
               {
                 stdenv = pkgs.clang19Stdenv;
               };
-          packages.rr = self'.packages.rr-clang;
+          packages.rr = self'.packages.rr-builtwithclang;
           packages.libSoftwareCountersGcc14 = (libSoftwareCountersGccFor "14" pkgs.gcc14Stdenv);
           packages.libSoftwareCountersGcc13 = (libSoftwareCountersGccFor "13" pkgs.gcc13Stdenv);
-          packages.libSoftwareCountersGcc = self'.packages.libSoftwareCountersGcc14;
-          packages.libSoftwareCounters19 = (
+          packages.libSoftwareCountersClang19 = (
             libSoftwareCountersFor "19" pkgs.clang19Stdenv pkgs.llvmPackages_19
           );
-          packages.libSoftwareCounters18 = (
+          packages.libSoftwareCountersClang18 = (
             libSoftwareCountersFor "18" pkgs.clang18Stdenv pkgs.llvmPackages_18
           );
-          packages.libSoftwareCounters = self'.packages.libSoftwareCounters19;
           packages.default = self'.packages.rr;
         };
     };
