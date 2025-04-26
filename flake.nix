@@ -23,7 +23,7 @@
           ...
         }:
         let
-          rr_preload_compiled_with =
+          rr_compiled_with =
             flavor: software_counters_plugin:
             pkgs.rr.overrideAttrs (prev: {
               version = "post5.9.0+${flavor}-soft";
@@ -118,8 +118,8 @@
           };
         in
         {
-          packages.rr-gcc = (rr_preload_compiled_with "gcc" libSoftwareCountersGcc);
-          packages.rr-clang = (rr_preload_compiled_with "clang" libSoftwareCounters).override {
+          packages.rr-gcc = (rr_compiled_with "gcc" libSoftwareCountersGcc);
+          packages.rr-clang = (rr_compiled_with "clang" libSoftwareCounters).override {
             stdenv = pkgs.clang19Stdenv;
           };
           packages.rr = self'.packages.rr-clang;
