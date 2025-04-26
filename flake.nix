@@ -34,18 +34,21 @@
                 #pkgs.gdb
                 #pkgs.lldb
               ] ++ prev.nativeBuildInputs;
-              buildInputs = [
-                pkgs.bzip2
-                pkgs.zstd
-                pkgs.lz4
-                pkgs.snappy
-                pkgs.rocksdb
-                pkgs.python3Packages.pexpect
-                pkgs.gdb
-                pkgs.lldb
-                self'.packages.libSoftwareCountersGcc
-                self'.packages.libSoftwareCounters
-              ] ++ prev.buildInputs;
+              buildInputs =
+                [
+                  pkgs.bzip2
+                  pkgs.zstd
+                  pkgs.lz4
+                  pkgs.snappy
+                  pkgs.rocksdb
+                  pkgs.python3Packages.pexpect
+                  pkgs.gdb
+                  pkgs.lldb
+                  self'.packages.libSoftwareCountersGcc
+                  self'.packages.libSoftwareCounters
+                ]
+                ++ pkgs.lib.optionals (system == "x86_64-linux") [ pkgs.zydis ]
+                ++ prev.buildInputs;
               # Removed it from flake, no problems
               preConfigure = "";
               cmakeFlags = prev.cmakeFlags ++ [
