@@ -58,34 +58,36 @@
               ];
               dontStrip = true;
             });
-          libSoftwareCountersGcc = pkgs.stdenv.mkDerivation {
-            pname = "libSoftwareCountersGcc";
-            version = "0.1";
-            src = ./.;
-            dontConfigure = true;
-            buildInputs = [ pkgs.gmp ];
-            buildPhase = ''
-              make -C ./compiler-plugins/SoftwareCountersGccPlugin/
-            '';
-            installPhase = ''
-              mkdir -p $out/lib64
-              cp compiler-plugins/SoftwareCountersGccPlugin/libSoftwareCountersGcc.so $out/lib64
-              # provide an alias to make things easy when building rr.soft
-              ln -s $out/lib64/libSoftwareCountersGcc.so $out/lib64/libSoftwareCounters.so
-            '';
-            meta = {
-              homepage = "https://github.com/sidkshatriya/rr.soft";
-              description = "libSoftwareCountersGcc";
+          libSoftwareCountersGccFor =
+            ver: gccStdenvArg:
+            gccStdenvArg.mkDerivation {
+              pname = "libSoftwareCountersGcc${ver}";
+              version = "0.1";
+              src = ./.;
+              dontConfigure = true;
+              buildInputs = [ pkgs.gmp ];
+              buildPhase = ''
+                make -C ./compiler-plugins/SoftwareCountersGccPlugin/
+              '';
+              installPhase = ''
+                mkdir -p $out/lib64
+                cp compiler-plugins/SoftwareCountersGccPlugin/libSoftwareCountersGcc.so $out/lib64
+                # provide an alias to make things easy when building rr.soft
+                ln -s $out/lib64/libSoftwareCountersGcc.so $out/lib64/libSoftwareCounters.so
+              '';
+              meta = {
+                homepage = "https://github.com/sidkshatriya/rr.soft";
+                description = "libSoftwareCountersGcc";
 
-              license = with pkgs.lib.licenses; [
-                gpl3Plus
-              ];
-              platforms = [
-                "aarch64-linux"
-                "x86_64-linux"
-              ];
+                license = with pkgs.lib.licenses; [
+                  gpl3Plus
+                ];
+                platforms = [
+                  "aarch64-linux"
+                  "x86_64-linux"
+                ];
+              };
             };
-          };
           libSoftwareCounters = pkgs.clang19Stdenv.mkDerivation {
             pname = "libSoftwareCounters";
             version = "0.1";
@@ -118,12 +120,18 @@
           };
         in
         {
-          packages.rr-gcc = (rr_compiled_with "gcc" libSoftwareCountersGcc);
+          packages.rr-gcc =
+            (rr_compiled_with "gcc" (libSoftwareCountersGccFor "14" pkgs.gcc14Stdenv)).override
+              {
+                stdenv = pkgs.gcc14Stdenv;
+              };
           packages.rr-clang = (rr_compiled_with "clang" libSoftwareCounters).override {
             stdenv = pkgs.clang19Stdenv;
           };
           packages.rr = self'.packages.rr-clang;
-          packages.libSoftwareCountersGcc = libSoftwareCountersGcc;
+          packages.libSoftwareCountersGcc14 = (libSoftwareCountersGccFor "14" pkgs.gcc14Stdenv);
+          packages.libSoftwareCountersGcc13 = (libSoftwareCountersGccFor "13" pkgs.gcc13Stdenv);
+          packages.libSoftwareCountersGcc = self'.packages.libSoftwareCountersGcc14;
           packages.libSoftwareCounters = libSoftwareCounters;
           packages.default = self'.packages.rr;
         };
