@@ -88,36 +88,38 @@
                 ];
               };
             };
-          libSoftwareCounters = pkgs.clang19Stdenv.mkDerivation {
-            pname = "libSoftwareCounters";
-            version = "0.1";
-            src = ./.;
-            nativeBuildInputs = [
-              pkgs.cmake
-              pkgs.ninja
-              pkgs.llvmPackages_19.libllvm
-            ];
-            cmakeFlags = [
-              ''-S=${./.}/compiler-plugins/SoftwareCountersClangPlugin''
-              "-GNinja"
-            ];
-            installPhase = ''
-              mkdir -p $out/lib64
-              cp libSoftwareCounters.so $out/lib64
-            '';
-            meta = {
-              homepage = "https://github.com/sidkshatriya/rr.soft";
-              description = "libSoftwareCounters";
+          libSoftwareCountersFor =
+            ver: clangStdenvArg: llvmPackagesArg:
+            clangStdenvArg.mkDerivation {
+              pname = "libSoftwareCounters${ver}";
+              version = "0.1";
+              src = ./.;
+              nativeBuildInputs = [
+                pkgs.cmake
+                pkgs.ninja
+                llvmPackagesArg.libllvm
+              ];
+              cmakeFlags = [
+                ''-S=${./.}/compiler-plugins/SoftwareCountersClangPlugin''
+                "-GNinja"
+              ];
+              installPhase = ''
+                mkdir -p $out/lib64
+                cp libSoftwareCounters.so $out/lib64
+              '';
+              meta = {
+                homepage = "https://github.com/sidkshatriya/rr.soft";
+                description = "libSoftwareCounters";
 
-              license = with pkgs.lib.licenses; [
-                asl20
-              ];
-              platforms = [
-                "aarch64-linux"
-                "x86_64-linux"
-              ];
+                license = with pkgs.lib.licenses; [
+                  asl20
+                ];
+                platforms = [
+                  "aarch64-linux"
+                  "x86_64-linux"
+                ];
+              };
             };
-          };
         in
         {
           packages.rr-gcc =
@@ -125,14 +127,23 @@
               {
                 stdenv = pkgs.gcc14Stdenv;
               };
-          packages.rr-clang = (rr_compiled_with "clang" libSoftwareCounters).override {
-            stdenv = pkgs.clang19Stdenv;
-          };
+          packages.rr-clang =
+            (rr_compiled_with "clang" (libSoftwareCountersFor "19" pkgs.clang19Stdenv pkgs.llvmPackages_19))
+            .override
+              {
+                stdenv = pkgs.clang19Stdenv;
+              };
           packages.rr = self'.packages.rr-clang;
           packages.libSoftwareCountersGcc14 = (libSoftwareCountersGccFor "14" pkgs.gcc14Stdenv);
           packages.libSoftwareCountersGcc13 = (libSoftwareCountersGccFor "13" pkgs.gcc13Stdenv);
           packages.libSoftwareCountersGcc = self'.packages.libSoftwareCountersGcc14;
-          packages.libSoftwareCounters = libSoftwareCounters;
+          packages.libSoftwareCounters19 = (
+            libSoftwareCountersFor "19" pkgs.clang19Stdenv pkgs.llvmPackages_19
+          );
+          packages.libSoftwareCounters18 = (
+            libSoftwareCountersFor "18" pkgs.clang18Stdenv pkgs.llvmPackages_18
+          );
+          packages.libSoftwareCounters = self'.packages.libSoftwareCounters19;
           packages.default = self'.packages.rr;
         };
     };
