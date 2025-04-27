@@ -103,16 +103,16 @@ aarch64 and x86-64 is supported for software counters record/replay.
 
 32-bit x86 is not planned to be supported, even in the future.
 
-Currently the following distributions have been tested:
+Currently the following Linux distributions have been tested:
 - Fedora 40, 41, 42
 - Ubuntu 24.10, 25.04
 - Debian Unstable
 
 rr.soft should be able to work properly on other distributions too.
 
-To use _Software Counters mode_ `rr` on apple silicon macOS, simply install
-any one of the above distribution in a Linux VM (Virtual Machine) and then
-follow the standard installation instructions.
+To use _Software Counters mode_ `rr` on apple silicon (i.e. aarch64) macOS, you need to
+first install any one of the above distribution in a Linux VM (Virtual Machine)
+and then follow the standard installation instructions.
 
 _If you are using aarch64, please use distributions with Linux kernel version >= 6.12
 for best results._
