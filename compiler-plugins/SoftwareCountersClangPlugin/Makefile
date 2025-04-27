@@ -24,7 +24,7 @@ compile_commands: cmake
 check: test
 
 install: cmake
-	cp build/libSoftwareCounters.so $(INSTALL_PATH)
+	cp build/libSoftwareCountersClang.so $(INSTALL_PATH)
 
 #--------------------------------
 %Opt.ll: %.ll cmake

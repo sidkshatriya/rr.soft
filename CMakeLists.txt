@@ -22,7 +22,8 @@ set(SOFTWARE_COUNTERS_PLUGIN "" CACHE PATH "file location of clang compiler plug
 if ("${SOFTWARE_COUNTERS_PLUGIN}" STREQUAL "")
   message(FATAL_ERROR "Cannot set SOFTWARE_COUNTERS_PLUGIN to empty string, \
                        please set to valid plugin file with full path. For example: \
-                       ~/libSoftwareCounters.so")
+                       ~/libSoftwareCountersClang.so if using clang & clang++ to compile \
+                       or ~/libSoftwareCountersGcc.so if using gcc & g++ to compile")
 endif()
 
 set(SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS OFF CACHE BOOL "\

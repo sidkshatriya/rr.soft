@@ -45,6 +45,7 @@ third-party/zen-pmu-workaround/*.mod
 third-party/zen-pmu-workaround/*.mod.c
 third-party/zen-pmu-workaround/Module.symvers
 third-party/zen-pmu-workaround/modules.order
+result
 rr_trace.capnp.*
 test32.c
 src/preload/rr_page.ld
