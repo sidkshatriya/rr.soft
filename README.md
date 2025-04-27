@@ -99,9 +99,9 @@ for details on how to invoke the plugins.
 
 ## Platform & Linux distribution support
 
-aarch64 and x86-64 is supported for software counters record/replay.
+Linux `aarch64` and `x86-64` platforms are supported for software counters record/replay.
 
-32-bit x86 is not planned to be supported, even in the future.
+(32-bit) `x86` is not planned to be supported, even in the future.
 
 Currently the following Linux distributions have been tested:
 - Fedora 40, 41, 42
@@ -110,25 +110,35 @@ Currently the following Linux distributions have been tested:
 
 rr.soft should be able to work properly on other distributions too.
 
+#### Other Linux distributions can use the `nix` package manager
+
+If your distribution is not listed above, don't worry, A `flake.nix`
+file is also included in git repo. This means that if you have the `nix` package
+manager installed on your Linux installation you can build and install
+_Software Counters mode_ `rr` there too !
+
+Please have a look at the detailed installation instructions.
+
+#### aarch64 macOS 
+
 To use _Software Counters mode_ `rr` on apple silicon (i.e. aarch64) macOS, you need to
-first install any one of the above distribution in a Linux VM (Virtual Machine)
-and then follow the standard installation instructions.
+first install a Linux VM (Virtual Machine) and then follow the standard installation instructions.
+
+#### Other tips
 
 _If you are using aarch64, please use distributions with Linux kernel version >= 6.12
 for best results._
 
 ### Running Software Counters mode `rr` within a container
 
-Note that it is _not_ neccessary to run _Software Counters mode_ `rr` 
-in the above distributions in a Virtual Machine or on bare metal. 
-
 You can actually run _Software Counters mode_ `rr` in a container
 using something like [podman](https://github.com/containers/podman) or 
-[distrobox](https://github.com/89luca89/distrobox) !
+[distrobox](https://github.com/89luca89/distrobox) ! This way you
+can avoid having to setup and install a full Linux distribution.
 
 ```bash
-$ distrobox enter fedora41
 $ distrobox create --image fedora:42 --name fedora42
+$ distrobox enter fedora42
 # Build Software Counters mode rr
 # Run it !
 ```
