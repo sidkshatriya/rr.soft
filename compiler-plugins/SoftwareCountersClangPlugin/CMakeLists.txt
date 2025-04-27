@@ -18,9 +18,9 @@ if(NOT LLVM_ENABLE_RTTI)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
 endif()
 
-add_library(SoftwareCounters SHARED SoftwareCounters.cpp)
+add_library(SoftwareCountersClang SHARED SoftwareCounters.cpp)
 
-set(SC_COMMON_FLAGS "-O0 -g -fpass-plugin=${CMAKE_CURRENT_BINARY_DIR}/libSoftwareCounters.so")
+set(SC_COMMON_FLAGS "-O0 -g -fpass-plugin=${CMAKE_CURRENT_BINARY_DIR}/libSoftwareCountersClang.so")
 
 set(INSTRUMENT_THESE
     testCounter
@@ -31,7 +31,7 @@ foreach( instrument_this ${INSTRUMENT_THESE} )
     add_executable(${instrument_this} "${instrument_this}.c")
     set_source_files_properties("${instrument_this}.c" PROPERTIES
                                 COMPILE_FLAGS ${SC_COMMON_FLAGS}
-                                OBJECT_DEPENDS SoftwareCounters)
+                                OBJECT_DEPENDS SoftwareCountersClang)
 
     add_custom_target("${instrument_this}.ll"
                       COMMENT "Generating ${instrument_this}.ll"
@@ -45,7 +45,7 @@ foreach( instrument_this ${INSTRUMENT_THESE} )
     add_custom_target("${instrument_this}Opt.ll"
                       COMMENT "Generating ${instrument_this}Opt.ll"
                       COMMAND opt
-                              -load-pass-plugin=${CMAKE_CURRENT_BINARY_DIR}/libSoftwareCounters.so
+                              -load-pass-plugin=${CMAKE_CURRENT_BINARY_DIR}/libSoftwareCountersClang.so
                               -S -passes="software-counters"
                               -o ${CMAKE_CURRENT_BINARY_DIR}/"${instrument_this}Opt.ll"
                               ${CMAKE_CURRENT_BINARY_DIR}/"${instrument_this}.ll"

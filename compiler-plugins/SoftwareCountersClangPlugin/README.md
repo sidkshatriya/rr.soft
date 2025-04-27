@@ -25,16 +25,16 @@ how to build and use this plugin.
 
 ## Usage
 
-_After building the plugin (`libSoftwareCounters.so`):_
+_After building the plugin (`libSoftwareCountersClang.so`):_
 
 ```bash
-# Static instrumentation using the libSoftwareCounters.so plugin
+# Static instrumentation using the libSoftwareCountersClang.so plugin
 # Assume the plugin is stored in $HOME for the purposes of this example
-$ clang -fpass-plugin=$HOME/libSoftwareCounters.so -g -O2 -o hello.c hello.c
+$ clang -fpass-plugin=$HOME/libSoftwareCountersClang.so -g -O2 -o hello.c hello.c
 
 # Works with C++ also
 # Assume the plugin is stored in ~/ for the purposes of this example
-$ clang++ -fpass-plugin=$HOME/libSoftwareCounters.so -g -O2 -o hello hello.cpp
+$ clang++ -fpass-plugin=$HOME/libSoftwareCountersClang.so -g -O2 -o hello hello.cpp
 
 # Executable will work normally, might be a bit slower
 $ ./hello
