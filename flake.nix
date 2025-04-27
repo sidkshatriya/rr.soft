@@ -48,7 +48,6 @@
               # Removed it from flake, no problems
               preConfigure = "";
               cmakeFlags = prev.cmakeFlags ++ [
-                "-DCMAKE_PREFIX_PATH=${pkgs.rocksdb};${pkgs.snappy.dev}"
                 "-DSOFTWARE_COUNTERS_PLUGIN=${software_counters_plugin}/lib/libSoftwareCounters.so"
                 "-GNinja"
               ];
