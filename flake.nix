@@ -31,8 +31,6 @@
               nativeBuildInputs = [
                 pkgs.pkg-config
                 pkgs.ninja
-                #pkgs.gdb
-                #pkgs.lldb
               ] ++ prev.nativeBuildInputs;
               buildInputs =
                 [
