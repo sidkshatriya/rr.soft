@@ -110,6 +110,10 @@ Currently the following distributions have been tested:
 
 rr.soft should be able to work properly on other distributions too.
 
+To use _Software Counters mode_ `rr` on apple silicon macOS, simply install
+any one of the above distribution in a Linux VM (Virtual Machine) and then
+follow the standard installation instructions.
+
 _If you are using aarch64, please use distributions with Linux kernel version >= 6.12
 for best results._
 
