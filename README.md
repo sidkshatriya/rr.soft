@@ -124,10 +124,13 @@ $ git clone https://github.com/sidkshatriya/rr.soft
 $ cd rr.soft
 # Enter a shell with rr available
 $ nix shell .#rr
-# Execute `which rr` to make sure Software Counters mode rr is available
+# Execute `which rr` to make sure you've got rr in PATH
+
 # You can now run Software Counters mode rr 😄 !
+$ cd <wherever-you-need-to>
 $ rr record -W -- <your-program>
 ...
+
 # debug it 😄 !
 $ rr replay -W 
 ```
@@ -158,8 +161,6 @@ $ distrobox enter fedora42
 ```
 
 ## Why is Software counters mode not upstreamed to [`rr`](https://github.com/rr-debugger/rr.git) ?
-
-Software Counters mode rr modifications _may_ be upstreamed in the future.
 
 The ability to run without CPU HW performance counters is a large
 feature patch and would require additional time and effort to get merged
