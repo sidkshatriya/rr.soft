@@ -105,9 +105,11 @@
               ];
               installPhase = ''
                 mkdir -p $out/lib64
-                mkdir -p $out/share/doc/libSoftwareCounters
-                cp $src/compiler-plugins/SoftwareCountersClangPlugin/LICENSE $out/share/doc/libSoftwareCounters
-                cp libSoftwareCounters.so $out/lib64
+                mkdir -p $out/share/doc/libSoftwareCountersClang
+                cp $src/compiler-plugins/SoftwareCountersClangPlugin/LICENSE $out/share/doc/libSoftwareCountersClang
+                cp libSoftwareCountersClang.so $out/lib64
+                # provide an alias to make things easy when building rr.soft
+                ln -s $out/lib64/libSoftwareCountersClang.so $out/lib64/libSoftwareCounters.so
               '';
               meta = {
                 homepage = "https://github.com/sidkshatriya/rr.soft";
