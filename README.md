@@ -104,7 +104,7 @@ Linux `aarch64` and `x86-64` platforms are supported for software counters recor
 (32-bit) `x86` is not planned to be supported, even in the future.
 
 Currently the following Linux distributions have been tested:
-- Fedora 40, 41, 42
+- Fedora 40, 41, 42 (Recommended -- most of the testing happens on this distribution)
 - Ubuntu 24.10, 25.04
 - Debian Unstable
 
@@ -117,7 +117,20 @@ file is also included in git repo. This means that if you have the `nix` package
 manager installed on your Linux installation you can build and install
 _Software Counters mode_ `rr` there too !
 
-Please have a look at the detailed installation instructions.
+Here is a quick way to get started with `nix`. Make sure nix flakes are enabled.
+
+```bash
+$ git clone https://github.com/sidkshatriya/rr.soft
+$ cd rr.soft
+# Enter a shell with rr available
+$ nix shell .#rr
+# Execute `which rr` to make sure Software Counters mode rr is available to you
+# You can now run Software Counters mode rr 😄 !
+$ rr record -W -- <your-program>
+...
+# debug it 😄 !
+$ rr replay -W 
+```
 
 #### aarch64 macOS 
 
