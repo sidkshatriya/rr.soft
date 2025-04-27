@@ -69,6 +69,8 @@
               '';
               installPhase = ''
                 mkdir -p $out/lib64
+                mkdir -p $out/share/doc/libSoftwareCountersGcc
+                cp compiler-plugins/SoftwareCountersGccPlugin/COPYING $out/share/doc/libSoftwareCountersGcc
                 cp compiler-plugins/SoftwareCountersGccPlugin/libSoftwareCountersGcc.so $out/lib64
                 # provide an alias to make things easy when building rr.soft
                 ln -s $out/lib64/libSoftwareCountersGcc.so $out/lib64/libSoftwareCounters.so
@@ -103,6 +105,8 @@
               ];
               installPhase = ''
                 mkdir -p $out/lib64
+                mkdir -p $out/share/doc/libSoftwareCounters
+                cp $src/compiler-plugins/SoftwareCountersClangPlugin/LICENSE $out/share/doc/libSoftwareCounters
                 cp libSoftwareCounters.so $out/lib64
               '';
               meta = {
