@@ -124,7 +124,7 @@ $ git clone https://github.com/sidkshatriya/rr.soft
 $ cd rr.soft
 # Enter a shell with rr available
 $ nix shell .#rr
-# Execute `which rr` to make sure Software Counters mode rr is available to you
+# Execute `which rr` to make sure Software Counters mode rr is available
 # You can now run Software Counters mode rr 😄 !
 $ rr record -W -- <your-program>
 ...
