@@ -122,7 +122,8 @@ Please have a look at the detailed installation instructions.
 #### aarch64 macOS 
 
 To use _Software Counters mode_ `rr` on apple silicon (i.e. aarch64) macOS, you need to
-first install a Linux VM (Virtual Machine) and then follow the standard installation instructions.
+first install one of the above distributions on a Linux VM (Virtual Machine) and then 
+follow the standard installation instructions.
 
 #### Other tips
 
