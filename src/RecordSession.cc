@@ -2997,13 +2997,8 @@ size_t db_write_arch<ARM64Arch>(
     if (s.sh_type != SHT_PROGBITS) {
       continue;
     }
-    // dont know how to deal with compressed sections yet
-    if (s.sh_flags & SHF_COMPRESSED) {
-      continue;
-    }
-    // Should be allocatable, executable and NOT writeable
-    if (!(s.sh_flags & SHF_ALLOC) || !(s.sh_flags & SHF_EXECINSTR) ||
-        (s.sh_flags & SHF_WRITE)) {
+    // Be conservative, just support AX sections
+    if (!(s.sh_flags == (SHF_ALLOC|SHF_EXECINSTR))) {
       continue;
     }
     // Batch writes to hopefully speed things up
