@@ -2175,7 +2175,7 @@ static bool file_may_need_instrumentation(const AddressSpace::Mapping& map) {
 }
 
 static bool file_may_need_software_counter_instrumentation(
-    const AddressSpace::Mapping& map) {
+    const AddressSpace::Mapping& map, const SupportedArch arch) {
   const string& fsname = map.map.fsname();
   if (fsname.empty() || fsname == "[stack]" || fsname == "[vdso]") {
     LOG(debug) << "Declining to dynamically software counter instrument: `"
@@ -2189,6 +2189,12 @@ static bool file_may_need_software_counter_instrumentation(
     ++file_part;
   }
   auto ret = fsname.find("librrpage", file_part) != string::npos ||
+             // aarch64 libcrypto.so has a lot of embedded data in the code section.
+             // See for example function `sha256_block_data_order` in `sha256-armv8.S`
+             // This confuses the aarch64 conditional branch finder with false positives
+             // for a conditional branch. Simply disable instrumentation for aarch64.
+             (arch == SupportedArch::aarch64 &&
+              fsname.find("libcrypto.so", file_part) != string::npos) ||
              fsname.find(SOFT_COUNT_STUB_TEMP_NAME, file_part) != string::npos;
   if (ret) {
     LOG(debug) << "Declining to dynamically software counter instrument: `"
@@ -2583,7 +2589,7 @@ void Monkeypatcher::software_counter_instrument_after_mmap(
     return;
   }
 
-  if (!file_may_need_software_counter_instrumentation(map)) {
+  if (!file_may_need_software_counter_instrumentation(map, t.arch())) {
     return;
   }
   // if the SCS_MINIMAL strategy is active, only a select set of shared
