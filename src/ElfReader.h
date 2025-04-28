@@ -91,6 +91,7 @@ struct SectionDetails {
   uint64_t sh_offset;
   uint64_t sh_size;
   uint64_t sh_addr;
+  std::string name;
 };
 
 struct PhdrDetails {

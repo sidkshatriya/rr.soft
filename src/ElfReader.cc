@@ -194,12 +194,18 @@ bool ElfReaderImpl<Arch>::sectionheader_i(size_t i, SectionDetails& sd) const {
   }
 
   auto& s = sections[i];
+  if (s.sh_name >= section_names.size()) {
+    LOG(debug) << "Invalid ELF file: invalid name offset for section " << i;
+    return false;
+  }
+  const char* name = section_names.data() + s.sh_name;
   sd = SectionDetails{
     .sh_type = s.sh_type,
     .sh_flags = s.sh_flags,
     .sh_offset = s.sh_offset,
     .sh_size = s.sh_size,
     .sh_addr = s.sh_addr,
+    .name = std::string(name),
   };
 
   return true;
