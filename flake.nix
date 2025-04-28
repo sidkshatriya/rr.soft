@@ -41,8 +41,10 @@
                 ]
                 ++ pkgs.lib.optionals (system == "x86_64-linux") [ pkgs.zydis ]
                 ++ prev.buildInputs;
-              # Removed it from flake, no problems
+              # Removed it by overriding in flake -- seems obsolete
               preConfigure = "";
+              # Removed it by overriding in flake -- seems obsolete
+              prePostpatch = "";
               cmakeFlags = prev.cmakeFlags ++ [
                 "-DSOFTWARE_COUNTERS_PLUGIN=${software_counters_plugin}/lib/libSoftwareCounters.so"
                 "-GNinja"
