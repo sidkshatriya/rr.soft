@@ -2,6 +2,7 @@
 
 #include "RecordSession.h"
 #include "Monkeypatcher.h"
+#include "Task.h"
 
 #include <elf.h>
 #include <limits.h>
@@ -3016,14 +3017,23 @@ size_t db_write_arch<ARM64Arch>(
 
     const uint32_t* start_addr = (uint32_t*)buf_pointer;
     const uint32_t* end_addr = (uint32_t*)(buf_pointer + s.sh_size);
+    bool patching_enabled = true;
     for (const uint32_t* insn_ptr = start_addr; insn_ptr < end_addr;
          insn_ptr += 1) {
-      if (is_conditional_branch_aarch64(*insn_ptr)) {
+      if (patching_enabled && is_conditional_branch_aarch64(*insn_ptr)) {
         insns_found++;
         status = batch.Put(
             rocksdb::Slice((const char*)&file_offset, sizeof(uint64_t)),
             rocksdb::Slice((const char*)&elf_addr, sizeof(uint64_t)));
         ASSERT(&t, status.ok()) << "could not Put batch";
+      } else if (is_ret_aarch64(*insn_ptr)) {
+        patching_enabled = true;
+      } else if (is_exclusive_load_aarch64(*insn_ptr)) {
+        // temporarily disable patching until we find a ret instruction.
+        // This is really a heuristic to avoid instrumenting
+        // conditional branch instructions associated with exclusive loads and
+        // stores which cause problems with record and replay on aarch64
+        patching_enabled = false;
       }
       file_offset += sizeof(uint32_t);
       elf_addr += sizeof(uint32_t);

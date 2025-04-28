@@ -38,10 +38,18 @@ bool is_conditional_branch_aarch64(uint32_t instr) {
          (((instr >> 24) & 0b0'111111'0) == 0b0'011011'0);
 }
 
-// Example: ldaxr
+// Example: ldaxp, ldaxr, ldxr, ldxrb etc.
 inline __attribute__((always_inline)) bool is_exclusive_load_aarch64(uint32_t instr) {
   // check if there is any lda?x* instruction
   if (((instr >> 16) & 0b00'111111'110'11111) == 0b00'001000'010'11111) {
+    return true;
+  }
+  return false;
+}
+
+// Example: ret, retaa, retab
+inline __attribute__((always_inline)) bool is_ret_aarch64(uint32_t instr) {
+  if ((instr >> 12) == 0b1101011'0'0'10'11111'0000) {
     return true;
   }
   return false;
