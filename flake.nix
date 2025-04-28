@@ -38,9 +38,6 @@
                   pkgs.lz4
                   pkgs.snappy
                   pkgs.rocksdb
-                  pkgs.python3Packages.pexpect
-                  pkgs.gdb
-                  pkgs.lldb
                 ]
                 ++ pkgs.lib.optionals (system == "x86_64-linux") [ pkgs.zydis ]
                 ++ prev.buildInputs;
