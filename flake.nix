@@ -29,7 +29,6 @@
               version = "soft-post5.9.0+builtwith${flavor}";
               src = ./.;
               nativeBuildInputs = [
-                pkgs.pkg-config
                 pkgs.ninja
               ] ++ prev.nativeBuildInputs;
               buildInputs =
