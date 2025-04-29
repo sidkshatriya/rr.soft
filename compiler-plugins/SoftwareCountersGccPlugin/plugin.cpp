@@ -276,7 +276,6 @@ static void _insert_soft_elf_section() {
   TREE_READONLY(soft_elf_section_var) = 1;
   // set the ELF section of the node
   set_decl_section_name(soft_elf_section_var, ".note.rr.soft");
-  DECL_WEAK(soft_elf_section_var) = 1;
   // defined here
   DECL_EXTERNAL(soft_elf_section_var) = 0;
   DECL_ARTIFICIAL(soft_elf_section_var) = 1;
@@ -299,6 +298,8 @@ static void _insert_soft_elf_section() {
   DECL_CONTEXT(soft_elf_section_var) = NULL_TREE;
   layout_decl(soft_elf_section_var, 0);
   auto node = varpool_node::get_create(soft_elf_section_var);
+  DECL_COMDAT(soft_elf_section_var) = 1;
+  node->set_comdat_group(DECL_ASSEMBLER_NAME(soft_elf_section_var));
   node->finalize_decl(soft_elf_section_var);
   // This is necessary
   node->force_output = 1;
