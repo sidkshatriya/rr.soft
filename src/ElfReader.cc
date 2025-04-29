@@ -2,9 +2,7 @@
 
 #include "ElfReader.h"
 #include "ScopedFd.h"
-#include "WaitStatus.h"
 
-#include <csignal>
 #include <elf.h>
 #include <endian.h>
 #include <sys/mman.h>
@@ -16,7 +14,6 @@
 
 #include "log.h"
 #include "util.h"
-#include "Flags.h"
 
 using namespace std;
 
@@ -35,8 +32,7 @@ public:
   virtual bool addr_to_offset(uintptr_t addr, uintptr_t& offset) = 0;
   virtual SectionOffsets find_section_file_offsets(const char* name) = 0;
   virtual const vector<uint8_t>* decompress_section(SectionOffsets offsets) = 0;
-  bool ok() { return ok_; }
-  virtual bool programheader_i(size_t i, struct PhdrDetails &p) const = 0;
+  bool ok() const { return ok_; }
   virtual bool sectionheader_i(size_t i, struct SectionDetails &s) const = 0;
 
 protected:
@@ -58,12 +54,11 @@ public:
   virtual bool addr_to_offset(uintptr_t addr, uintptr_t& offset) override;
   virtual SectionOffsets find_section_file_offsets(const char* name) override;
   virtual const vector<uint8_t>* decompress_section(SectionOffsets offsets) override;
-  virtual bool programheader_i(size_t i, PhdrDetails &p) const override;
   virtual bool sectionheader_i(size_t i, SectionDetails &s) const override;
 
 private:
-  const typename Arch::ElfPhdr* find_programheader(uint32_t pt);
   const typename Arch::ElfShdr* find_section(const char* n);
+  const typename Arch::ElfPhdr* find_programheader(uint32_t pt);
 
   const typename Arch::ElfEhdr* elfheader;
   const typename Arch::ElfPhdr* programheader;
@@ -146,22 +141,6 @@ const typename Arch::ElfPhdr* ElfReaderImpl<Arch>::find_programheader(uint32_t p
 }
 
 template <typename Arch>
-bool ElfReaderImpl<Arch>::programheader_i(size_t i,
-                                          struct PhdrDetails& p) const {
-  if (i >= programheader_size) {
-    return false;
-  }
-  auto& phi = programheader[i];
-  p = PhdrDetails{ .p_type = phi.p_type,
-                   .p_flags = phi.p_flags,
-                   .p_offset = phi.p_offset,
-                   .p_filesz = phi.p_filesz,
-                   .p_vaddr = phi.p_vaddr,
-                  };
-  return true;
-}
-
-template <typename Arch>
 const typename Arch::ElfShdr* ElfReaderImpl<Arch>::find_section(const char* n) {
   const typename Arch::ElfShdr* section = nullptr;
 
@@ -189,6 +168,9 @@ const typename Arch::ElfShdr* ElfReaderImpl<Arch>::find_section(const char* n) {
 
 template <typename Arch>
 bool ElfReaderImpl<Arch>::sectionheader_i(size_t i, SectionDetails& sd) const {
+  if (!ok()) {
+    return false;
+  }
   if (i >= sections_size) {
     return false;
   }
@@ -608,10 +590,6 @@ SectionOffsets ElfReader::find_section_file_offsets(const char* name) {
   return impl().find_section_file_offsets(name);
 }
 
-bool ElfReader::programheader_i(size_t i, PhdrDetails &p) {
-  return impl().programheader_i(i, p);
-}
-
 bool ElfReader::sectionheader_i(size_t i, SectionDetails &s) {
   return impl().sectionheader_i(i, s);
 }
@@ -635,6 +613,8 @@ bool ElfReader::addr_to_offset(uintptr_t addr, uintptr_t& offset) {
 
 bool ElfReader::ok() { return impl().ok(); }
 
+// Note that here "ok" simply means that fd could be fstat-ed and mmap-ed
+// fd may itself NOT be a valid elf file.
 ElfFileReader::ElfFileReader(ScopedFd& fd, SupportedArch arch, bool *ok) : ElfReader(arch) {
   struct stat st;
   if (fstat(fd, &st) < 0) {

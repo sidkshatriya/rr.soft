@@ -94,14 +94,6 @@ struct SectionDetails {
   std::string name;
 };
 
-struct PhdrDetails {
-  uint32_t p_type;
-  uint32_t p_flags;
-  uint64_t p_offset;
-  uint64_t p_filesz;
-  uint64_t p_vaddr;
-};
-
 class ElfReader {
 public:
   ElfReader(SupportedArch arch);
@@ -138,8 +130,6 @@ public:
   SectionOffsets find_section_file_offsets(const char* name);
   DwarfSpan dwarf_section(const char* name, bool known_to_be_compressed = false);
   SupportedArch arch() const { return arch_; }
-  // index i is 0 based
-  bool programheader_i(size_t i, PhdrDetails &p);
   // index i is 0 based
   bool sectionheader_i(size_t i, SectionDetails &p);
 private:
