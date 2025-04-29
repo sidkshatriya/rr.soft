@@ -3278,10 +3278,10 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
 
     // if the section exits, the elf file is instrumented
     if (reader.find_section_file_offsets(".rr.soft.instrumented").start) {
-      LOG(warn) << "`" << fsname
-                << "` seems to be already (statically) software counter "
-                   "instrumented. It will not be considered for "
-                   "dynamic instrumentation";
+      LOG(info) << "`" << fsname
+                << "` is already (statically) software counter "
+                   "instrumented as ELF section .rr.soft.instrumented was found. "
+                   "It will not be considered for dynamic instrumentation";
       already_statically_instrumented = true;
     } else {
       // Older versions of the compiler plugins don't add the .rr.soft.instrumented
@@ -3292,7 +3292,7 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
       const size_t len = syms.size();
       for (size_t i = 0; i < len; ++i) {
         if (syms.is_name(i, "__do_software_count")) {
-          LOG(warn) << "`" << fsname
+          LOG(info) << "`" << fsname
                     << "` seems to be already (statically) software counter "
                        "instrumented. It will not be considered for "
                        "dynamic instrumentation";
