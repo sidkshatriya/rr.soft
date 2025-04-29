@@ -24,7 +24,7 @@ namespace rr {
 
 class ElfReaderImplBase {
 public:
-  ElfReaderImplBase(ElfReader& r) : r(r), ok_(false) {}
+  ElfReaderImplBase(ElfReader& r) : r(r), elf_valid_(false) {}
   virtual ~ElfReaderImplBase() {}
   virtual SymbolTable read_symbols(const char* symtab, const char* strtab) = 0;
   virtual DynamicSection read_dynamic() = 0;
@@ -35,14 +35,14 @@ public:
   virtual bool addr_to_offset(uintptr_t addr, uintptr_t& offset) = 0;
   virtual SectionOffsets find_section_file_offsets(const char* name) = 0;
   virtual const vector<uint8_t>* decompress_section(SectionOffsets offsets) = 0;
-  bool ok() { return ok_; }
+  bool elf_valid() { return elf_valid_; }
   virtual bool programheader_i(size_t i, struct PhdrDetails &p) const = 0;
   virtual bool sectionheader_i(size_t i, struct SectionDetails &s) const = 0;
 
 protected:
   ElfReader& r;
   vector<unique_ptr<vector<uint8_t>>> decompressed_sections;
-  bool ok_;
+  bool elf_valid_;
 };
 
 template <typename Arch> class ElfReaderImpl : public ElfReaderImplBase {
@@ -125,7 +125,7 @@ ElfReaderImpl<Arch>::ElfReaderImpl(ElfReader& r) : ElfReaderImplBase(r) {
   memcpy(section_names.data(), section_names_ptr, section_names.size());
   section_names[section_names.size() - 1] = 0;
 
-  ok_ = true;
+  elf_valid_ = true;
 }
 
 template <typename Arch>
@@ -309,7 +309,7 @@ template <typename Arch>
 SymbolTable ElfReaderImpl<Arch>::read_symbols(const char* symtab,
                                               const char* strtab) {
   SymbolTable result;
-  if (!ok()) {
+  if (!elf_valid()) {
     return result;
   }
 
@@ -367,7 +367,7 @@ SymbolTable ElfReaderImpl<Arch>::read_symbols(const char* symtab,
 
 template <typename Arch> DynamicSection ElfReaderImpl<Arch>::read_dynamic() {
   DynamicSection result;
-  if (!ok()) {
+  if (!elf_valid()) {
     return result;
   }
 
@@ -433,7 +433,7 @@ static bool null_terminated(const char* p, size_t size, string& out) {
 
 template <typename Arch> Debuglink ElfReaderImpl<Arch>::read_debuglink() {
   Debuglink result;
-  if (!ok()) {
+  if (!elf_valid()) {
     return result;
   }
 
@@ -464,7 +464,7 @@ template <typename Arch> Debuglink ElfReaderImpl<Arch>::read_debuglink() {
 
 template <typename Arch> Debugaltlink ElfReaderImpl<Arch>::read_debugaltlink() {
   Debugaltlink result;
-  if (!ok()) {
+  if (!elf_valid()) {
     return result;
   }
 
@@ -492,7 +492,7 @@ template <typename Arch> Debugaltlink ElfReaderImpl<Arch>::read_debugaltlink() {
 template <typename Arch>
 string ElfReaderImpl<Arch>::read_buildid() {
   string result;
-  if (!ok()) {
+  if (!elf_valid()) {
     return result;
   }
 
@@ -546,7 +546,7 @@ string ElfReaderImpl<Arch>::read_buildid() {
 template <typename Arch>
 string ElfReaderImpl<Arch>::read_interp() {
   string result;
-  if (!ok()) {
+  if (!elf_valid()) {
     return result;
   }
 
@@ -633,8 +633,10 @@ bool ElfReader::addr_to_offset(uintptr_t addr, uintptr_t& offset) {
   return impl().addr_to_offset(addr, offset);
 }
 
-bool ElfReader::ok() { return impl().ok(); }
+bool ElfReader::elf_valid() { return impl().elf_valid(); }
 
+// Note that here "ok" simply means that fd could be fstat-ed and mmap-ed
+// fd may itself NOT be a valid elf file.
 ElfFileReader::ElfFileReader(ScopedFd& fd, SupportedArch arch, bool *ok) : ElfReader(arch) {
   struct stat st;
   if (fstat(fd, &st) < 0) {

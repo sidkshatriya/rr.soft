@@ -123,7 +123,7 @@ public:
     memcpy(out, r, sizeof(*out));
     return true;
   }
-  bool ok();
+  bool elf_valid();
   SymbolTable read_symbols(const char* symtab, const char* strtab);
   DynamicSection read_dynamic();
   Debuglink read_debuglink();
