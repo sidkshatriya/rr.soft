@@ -692,7 +692,7 @@ find_auxiliary_file(const string& original_file_name,
 found:
   LOG(info) << "Examining external " << full_file_name;
   auto reader = make_unique<ElfFileReader>(fd);
-  if (!reader->elf_valid()) {
+  if (!reader->ok()) {
     LOG(warn) << "Not an ELF file!";
     return nullptr;
   }
@@ -734,7 +734,7 @@ find_auxiliary_file_by_buildid(ElfFileReader& trace_file_reader,
 
   LOG(info) << "Examining external by buildid " << path;
   auto reader = make_unique<ElfFileReader>(fd);
-  if (!reader->elf_valid()) {
+  if (!reader->ok()) {
     LOG(warn) << "Not an ELF file!";
     return nullptr;
   }
@@ -1076,7 +1076,7 @@ static int sources(const iterable& binary_file_names,
     }
     LOG(info) << "Examining " << file_name;
     ElfFileReader reader(fd);
-    if (!reader.elf_valid()) {
+    if (!reader.ok()) {
       LOG(info) << "Probably not an ELF file, skipping";
       continue;
     }
