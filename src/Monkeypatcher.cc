@@ -2606,7 +2606,7 @@ void Monkeypatcher::software_counter_instrument_after_mmap(
   }
   bool ok = true;
   ElfFileReader reader(open_fd, t.arch(), &ok);
-  if (!ok || !reader.elf_valid()) {
+  if (!ok || !reader.ok()) {
     return;
   }
   auto unique_id = reader.read_buildid();
