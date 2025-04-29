@@ -2632,12 +2632,14 @@ void Monkeypatcher::software_counter_instrument_after_mmap(
 
   auto it = t.session().patchdb_map.find(unique_id);
   if (it == t.session().patchdb_map.end()) {
-    // Can now do without symbols on x86-64 and aarch64.
-    //
-    // However need this for for now to check if executable has already been statically
-    // instrumented (will need to hunt for __do_software_count)
-    // TODO: Better way to mark an executable as statically instrumented
+    // Can now do without symbols on x86-64 and aarch64 now !
+    // This is only there to serve as an *additional* way to check if the ELF
+    // file has already been statically instrumented. Newer versions of the
+    // compiler plugin now add a .rr.soft.instrumented section to indicate
+    // that the ELF file has been statically instrumented.
+    // TODO: Consider removing below line in the future.
     SymbolTable syms = reader.read_symbols(".symtab", ".strtab");
+
     t.session().get_or_create_db_of_patch_locations(t, map.map.fsname(), reader,
                                                     syms, unique_id);
   }

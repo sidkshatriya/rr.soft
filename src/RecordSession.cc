@@ -3276,18 +3276,29 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
     default_write_options_tmp.disableWAL = true;
     const auto default_write_options = default_write_options_tmp;
 
-    const size_t len = syms.size();
-    for (size_t i = 0; i < len; ++i) {
-      if (syms.is_name(i, "__do_software_count")) {
-        LOG(warn) << "`" << fsname
-                  << "` seems to be already (statically) software counter "
-                     "instrumented. It will not be considered for "
-                     "dynamic instrumentation";
-        // TODO: Need to have a better way to abort early than go through all
-        // symbols. However this happens only once, when the db gets created so
-        // it should not be a huge issue.
-        already_statically_instrumented = true;
-        break;
+    // if the section exits, the elf file is instrumented
+    if (reader.find_section_file_offsets(".rr.soft.instrumented").start) {
+      LOG(warn) << "`" << fsname
+                << "` seems to be already (statically) software counter "
+                   "instrumented. It will not be considered for "
+                   "dynamic instrumentation";
+      already_statically_instrumented = true;
+    } else {
+      // Older versions of the compiler plugins don't add the .rr.soft.instrumented
+      // section -- this is the older way of checking if the ELF file has been instrumented.
+      // (this assumes that the executable/shared object was not stripped of its symbols)
+      // It's good to have this around as an additional check -- it could be dropped
+      // in the future.
+      const size_t len = syms.size();
+      for (size_t i = 0; i < len; ++i) {
+        if (syms.is_name(i, "__do_software_count")) {
+          LOG(warn) << "`" << fsname
+                    << "` seems to be already (statically) software counter "
+                       "instrumented. It will not be considered for "
+                       "dynamic instrumentation";
+          already_statically_instrumented = true;
+          break;
+        }
       }
     }
 
