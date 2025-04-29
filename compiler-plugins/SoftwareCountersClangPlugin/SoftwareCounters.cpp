@@ -25,6 +25,7 @@
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
 
 #include <stdlib.h>
 
@@ -68,11 +69,11 @@ void InsertSoftNoteGlobalVar(LLVMContext &C, Module &M) {
   SectionVar->setConstant(true);
   SectionVar->setSection(".rr.soft.instrumented");
   SectionVar->setVisibility(GlobalValue::HiddenVisibility);
-  SectionVar->addAttribute("used");
   auto comdat = M.getOrInsertComdat("__rr_soft_note");
   comdat->setSelectionKind(Comdat::SelectionKind::Any);
   SectionVar->setComdat(comdat);
   SectionVar->setInitializer(ConstantInt::get(Int32Ty, 1));
+  appendToUsed(M, SectionVar);
 }
 
 void InsertCounterFunctionWithDefinitionAArch64(LLVMContext &C, Module &M,
