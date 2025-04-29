@@ -59,45 +59,20 @@ void InsertSoftCounterEnableGlobal(LLVMContext &C, Module &M) {
 }
 
 void InsertSoftNoteGlobalVar(LLVMContext &C, Module &M) {
-  IntegerType *Int8Ty = IntegerType::getInt8Ty(C);
-  ArrayType *ArT = ArrayType::get(Int8Ty, 24);
-  auto Zero = ConstantInt::get(Int8Ty, 0);
-  auto One = ConstantInt::get(Int8Ty, 1);
-  auto Eight = ConstantInt::get(Int8Ty, 8);
-  auto R = ConstantInt::get(Int8Ty, 'r');
-  auto Dot = ConstantInt::get(Int8Ty, '.');
-  auto S = ConstantInt::get(Int8Ty, 's');
-  auto O = ConstantInt::get(Int8Ty, 'o');
-  auto F = ConstantInt::get(Int8Ty, 'f');
-  auto T = ConstantInt::get(Int8Ty, 't');
+  IntegerType *Int32Ty = IntegerType::getInt32Ty(C);
 
-  M.getOrInsertGlobal(SOFT_COUNTER_NOTE_SECTION_VAR_NAME, ArT);
-  GlobalVariable *ArVar =
+  M.getOrInsertGlobal(SOFT_COUNTER_NOTE_SECTION_VAR_NAME, Int32Ty);
+  GlobalVariable *SectionVar =
       M.getNamedGlobal(SOFT_COUNTER_NOTE_SECTION_VAR_NAME);
-  ArVar->setAlignment(Align(4));
-  ArVar->setConstant(true);
-  ArVar->setSection(".note.rr.soft");
-  ArVar->setVisibility(GlobalValue::HiddenVisibility);
-  ArVar->addAttribute("used");
+  SectionVar->setAlignment(Align(4));
+  SectionVar->setConstant(true);
+  SectionVar->setSection(".rr.soft.instrumented");
+  SectionVar->setVisibility(GlobalValue::HiddenVisibility);
+  SectionVar->addAttribute("used");
   auto comdat = M.getOrInsertComdat("__rr_soft_note");
   comdat->setSelectionKind(Comdat::SelectionKind::Any);
-  ArVar->setComdat(comdat);
-
-  // See struct Elf64_Nhdr in /usr/include/elf.h
-  SmallVector<Constant*> sv {
-    // n_namesz - name len bytes (NUL is counted) as u32 little endian
-    Eight, Zero, Zero, Zero,
-    // n_descsz - description len bytes as u32 little endian
-    One, Zero, Zero, Zero,
-    // n_type - u32 little endian
-    One, Zero, Zero, Zero,
-    // name - "rr.soft\0"
-    R, R, Dot, S, O, F, T, Zero,
-    // description - 0x01
-    One, Zero, Zero, Zero,
-  };
-  auto aref = ArrayRef(sv);
-  ArVar->setInitializer(ConstantArray::get(ArT, aref));
+  SectionVar->setComdat(comdat);
+  SectionVar->setInitializer(ConstantInt::get(Int32Ty, 1));
 }
 
 void InsertCounterFunctionWithDefinitionAArch64(LLVMContext &C, Module &M,
