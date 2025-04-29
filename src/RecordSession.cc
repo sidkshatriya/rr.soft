@@ -2956,6 +2956,10 @@ static string default_patch_loc_db_save_dir() {
   return cached_dir;
 }
 
+// Increment VERX if cache logic changes (e.g. starting to ignore some conditional
+// branch instructions) or old cache otherwise needs to be ignored
+#define CACHE_VERSION "VER1"
+
 // Has the side effect of creating this dir, if it does not exist already
 string patch_loc_db_save_dir() {
   static string cached_dir;
@@ -2970,6 +2974,9 @@ string patch_loc_db_save_dir() {
   } else {
     cached_dir = default_patch_loc_db_save_dir();
   }
+
+  // append the hardcoded cache version
+  cached_dir += "/" CACHE_VERSION "/";
 
   ensure_dir(cached_dir, "patch location dbs cache dir", S_IRWXU);
 
