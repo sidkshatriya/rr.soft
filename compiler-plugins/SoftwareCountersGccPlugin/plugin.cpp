@@ -259,11 +259,9 @@ static void _insert_soft_elf_section() {
   if (soft_elf_section_var) {
     return;
   }
-  auto index_type = build_index_type(size_int(24 - 1));
-  auto section_char_array_type = build_array_type(char_type_node, index_type);
   soft_elf_section_var =
       build_decl(UNKNOWN_LOCATION, VAR_DECL, get_identifier(SOFT_ELF_SECTION),
-                 section_char_array_type);
+                 integer_type_node);
 
   // Available from other translation units
   TREE_PUBLIC(soft_elf_section_var) = 1;
@@ -275,25 +273,18 @@ static void _insert_soft_elf_section() {
   // Need this for section to marked as allocatable only
   TREE_READONLY(soft_elf_section_var) = 1;
   // set the ELF section of the node
-  set_decl_section_name(soft_elf_section_var, ".note.rr.soft");
+  set_decl_section_name(soft_elf_section_var, ".rr.soft.instrumented");
   // defined here
   DECL_EXTERNAL(soft_elf_section_var) = 0;
   DECL_ARTIFICIAL(soft_elf_section_var) = 1;
   DECL_VISIBILITY(soft_elf_section_var) = VISIBILITY_HIDDEN;
   DECL_VISIBILITY_SPECIFIED(soft_elf_section_var) = 1;
-  // array should alignment of 4 bytes
+  // Should have alignment of 4 bytes
   DECL_USER_ALIGN(soft_elf_section_var) = 1;
   SET_DECL_ALIGN(soft_elf_section_var, 4 * 8);
   // Initialization
-  const char soft_note_data[] = {8, 0, 0, 0, 1, 0, 0, 0,
-                                 1, 0, 0, 0, 'r', 'r', '.', 's',
-                                 'o', 'f', 't', 0, 1, 0, 0, 0};
-  vec<tree, va_gc> *init_vec = NULL;
-  for (int i = 0; i < 24; i++) {
-    vec_safe_push(init_vec, build_int_cst(char_type_node, soft_note_data[i]));
-  }
-  auto init_tree = build_constructor_from_vec(section_char_array_type, init_vec);
-  DECL_INITIAL(soft_elf_section_var) = init_tree;
+  const uint32_t soft_elf_section_var_data = 1;
+  DECL_INITIAL(soft_elf_section_var) = build_int_cst(integer_type_node, soft_elf_section_var_data);
 
   DECL_CONTEXT(soft_elf_section_var) = NULL_TREE;
   layout_decl(soft_elf_section_var, 0);
