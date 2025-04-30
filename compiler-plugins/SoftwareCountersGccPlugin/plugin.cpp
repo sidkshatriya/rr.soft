@@ -29,10 +29,14 @@
 #include "gimple-iterator.h"
 #include "basic-block.h"
 #include "coretypes.h"
+#include "target.h"
+#include "output.h"
 
 using namespace std;
 
 /* TODO: Cross platform compilation support */
+
+void (*old_target_asm_named_section)(const char *, unsigned int, tree);
 
 const uint32_t AddrTicksHI_aarch64 = RR_AARCH64_CUSTOM_TICKS_ADDR >> 16;
 const uint32_t AddrTicksLO_aarch64 = RR_AARCH64_CUSTOM_TICKS_ADDR & 0xFFFF;
@@ -110,7 +114,8 @@ const uint32_t AddrTicksReachedBreakLO_aarch64 =
 
 #define DO_SOFTWARE_COUNT "__do_software_count"
 #define SOFT_CNT_ENABLE "__soft_cnt_enable"
-#define SOFT_ELF_SECTION "__rr_soft_section"
+#define SOFT_ELF_SECTION_VAR_NAME "__rr_soft_section"
+#define SOFT_ELF_SECTION_NAME ".rr.soft.instrumented"
 
 #define X8664_instrumentation_string                                           \
   std::format(                                           \
@@ -260,7 +265,7 @@ static void _insert_soft_elf_section() {
     return;
   }
   soft_elf_section_var =
-      build_decl(UNKNOWN_LOCATION, VAR_DECL, get_identifier(SOFT_ELF_SECTION),
+      build_decl(UNKNOWN_LOCATION, VAR_DECL, get_identifier(SOFT_ELF_SECTION_VAR_NAME),
                  integer_type_node);
 
   // Available from other translation units
@@ -273,7 +278,7 @@ static void _insert_soft_elf_section() {
   // Need this for section to marked as allocatable only
   TREE_READONLY(soft_elf_section_var) = 1;
   // set the ELF section of the node
-  set_decl_section_name(soft_elf_section_var, ".rr.soft.instrumented");
+  set_decl_section_name(soft_elf_section_var, SOFT_ELF_SECTION_NAME);
   // defined here
   DECL_EXTERNAL(soft_elf_section_var) = 0;
   DECL_ARTIFICIAL(soft_elf_section_var) = 1;
@@ -291,6 +296,10 @@ static void _insert_soft_elf_section() {
   auto node = varpool_node::get_create(soft_elf_section_var);
   DECL_COMDAT(soft_elf_section_var) = 1;
   node->set_comdat_group(DECL_ASSEMBLER_NAME(soft_elf_section_var));
+  // This is critical for the variable not to be removed during LTO.
+  // If the variable is removed the SOFT_ELF_SECTION_NAME elf section
+  // will automatically be removed, even if it has SECTION_RETAIN
+  DECL_PRESERVE_P(soft_elf_section_var) = 1;
   node->finalize_decl(soft_elf_section_var);
   // This is necessary
   node->force_output = 1;
@@ -457,10 +466,26 @@ unsigned int software_counters_pass::execute(function *fun) {
   return 0;
 }
 
+void plugin_elf_asm_named_section(const char *name, unsigned int flags,
+                                  tree decl) {
+  if (!strcmp(name, SOFT_ELF_SECTION_NAME)) {
+    // Adding this flag is not compulsory because DECL_PRESERVE_P
+    // on the variable within the section makes sure this section is kept around.
+    // This flag results in the section flag to be show as "AR" with
+    // eu-readelf --section-headers and means "allocatable + retained"
+    // Adding this flag makes the section flag consistent with the Clang plugin.
+    flags |= SECTION_RETAIN;
+  }
+  old_target_asm_named_section(name, flags, decl);
+}
+
 int plugin_init(struct plugin_name_args *this_plugin,
                 struct plugin_gcc_version *version) {
   struct register_pass_info inserted_pass;
   const char *plugin_name = this_plugin->base_name;
+
+  old_target_asm_named_section = targetm.asm_out.named_section;
+  targetm.asm_out.named_section = plugin_elf_asm_named_section;
 
   inserted_pass.pass = new software_counters_pass(g);
 
