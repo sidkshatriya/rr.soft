@@ -2615,8 +2615,10 @@ void Monkeypatcher::software_counter_instrument_after_mmap(
     // Assign the unique id, note the type above is an auto&
     maybe_unique_id = unique_id;
   } else {
-    // TODO: do a sha256sum in the mount namespace of the the executable ??
-    unique_id = sha256sum(map.map.fsname());
+    // Access the file in /proc/<tid>/root/<fsname>
+    // This way the file will be visible to rr just like it is to the process
+    unique_id =
+        sha256sum("/proc/" + to_string(t.tid) + "/root/" + map.map.fsname());
     if (!unique_id.size()) {
       return;
     }
