@@ -13,18 +13,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "locations.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/IR/InlineAsm.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Pass.h"
-#include "llvm/IR/Instructions.h"
+#include <llvm/Pass.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/ADT/StringExtras.h>
+#include <llvm/IR/InlineAsm.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/PassPlugin.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
+
 #include <stdlib.h>
+
+#include "locations.h"
 
 using namespace llvm;
 
@@ -40,6 +45,8 @@ auto AddrTicksReachedBreakLO_aarch64 =
 
 #define SOFT_COUNTER_ENABLE_NAME "__soft_cnt_enable"
 
+#define SOFT_COUNTER_NOTE_SECTION_VAR_NAME "__rr_soft_note"
+
 void InsertSoftCounterEnableGlobal(LLVMContext &C, Module &M) {
   IntegerType *Int32Ty = IntegerType::getInt32Ty(C);
   ConstantInt *MinInt32 = ConstantInt::get(Int32Ty, 0x8000'0000);
@@ -50,6 +57,23 @@ void InsertSoftCounterEnableGlobal(LLVMContext &C, Module &M) {
   SoftCounterEnable->setLinkage(GlobalValue::LinkOnceODRLinkage);
   SoftCounterEnable->setVisibility(GlobalValue::HiddenVisibility);
   SoftCounterEnable->setInitializer(MinInt32);
+}
+
+void InsertSoftNoteGlobalVar(LLVMContext &C, Module &M) {
+  IntegerType *Int32Ty = IntegerType::getInt32Ty(C);
+
+  M.getOrInsertGlobal(SOFT_COUNTER_NOTE_SECTION_VAR_NAME, Int32Ty);
+  GlobalVariable *SectionVar =
+      M.getNamedGlobal(SOFT_COUNTER_NOTE_SECTION_VAR_NAME);
+  SectionVar->setAlignment(Align(4));
+  SectionVar->setConstant(true);
+  SectionVar->setSection(".rr.soft.instrumented");
+  SectionVar->setVisibility(GlobalValue::HiddenVisibility);
+  auto comdat = M.getOrInsertComdat("__rr_soft_note");
+  comdat->setSelectionKind(Comdat::SelectionKind::Any);
+  SectionVar->setComdat(comdat);
+  SectionVar->setInitializer(ConstantInt::get(Int32Ty, 1));
+  appendToUsed(M, SectionVar);
 }
 
 void InsertCounterFunctionWithDefinitionAArch64(LLVMContext &C, Module &M,
@@ -352,14 +376,17 @@ struct SoftwareCounters : PassInfoMixin<SoftwareCounters> {
       }
     }
 
+    // Even if no function ends up getting instrumented in the module, the code should
+    // not be considered for dynamic instrumentation anymore -- indicate this by adding
+    // a .note.rr.soft ELF section
+    InsertSoftNoteGlobalVar(C, M);
     if (InstrumentedAFunction) {
+      InsertSoftCounterEnableGlobal(C, M);
       // Now insert the software counter function definition that does the
       // counting
       if (is_aarch64) {
-        InsertSoftCounterEnableGlobal(C, M);
         InsertCounterFunctionWithDefinitionAArch64(C, M, DoSoftwareCountCallee);
       } else {
-        InsertSoftCounterEnableGlobal(C, M);
         InsertCounterFunctionWithDefinitionX86_64(C, M, DoSoftwareCountCallee);
       }
     }
