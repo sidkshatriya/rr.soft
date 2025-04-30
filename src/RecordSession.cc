@@ -3276,7 +3276,7 @@ RecordSession::cached_data RecordSession::get_or_create_db_of_patch_locations(
     default_write_options_tmp.disableWAL = true;
     const auto default_write_options = default_write_options_tmp;
 
-    // if the section exits, the elf file is instrumented
+    // if the section exists, the elf file is instrumented
     if (reader.find_section_file_offsets(".rr.soft.instrumented").start) {
       LOG(info) << "`" << fsname
                 << "` is already (statically) software counter "

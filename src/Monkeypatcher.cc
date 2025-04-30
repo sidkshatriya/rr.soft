@@ -2627,7 +2627,7 @@ void Monkeypatcher::software_counter_instrument_after_mmap(
     auto& maybe_unique_id = t.vm()->mapping_unique_id_of(start_region);
     // Assign the unique id, note the type above is an auto&
     maybe_unique_id = unique_id;
-    LOG(warn) << map.map.fsname()
+    LOG(info) << map.map.fsname()
               << " does not have a build_id, using file sha256sum of "
               << unique_id << " as the unique id";
   }
