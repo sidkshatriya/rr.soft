@@ -15,7 +15,7 @@ elif [ -d patch-loc-cache ]; then
   "$fde" . -I -d 1 patch-loc-cache | xargs -Iz sh -c 'printf "%s:%s\n" $(basename z) $(cat z/filename.txt)'
 elif [ -d ~/.cache/rr/VER1 ]; then
   echo cache entries in ~/.cache/rr 1>&2
-  "$fde" . -I -d 1 ~/.cache/rr | xargs -Iz sh -c 'printf "%s:%s\n" $(basename z) $(cat z/filename.txt)'
+  "$fde" . -I -d 1 ~/.cache/rr/VER1 | xargs -Iz sh -c 'printf "%s:%s\n" $(basename z) $(cat z/filename.txt)'
 else
   echo ~/.cache/rr/VER1 does not exist ! 1>&2
   exit 1
