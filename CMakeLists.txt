@@ -314,6 +314,8 @@ set(REQUIRED_LIBS
   capnp
 # zlib is required to handle ELF compression
   zlib
+  # openssl library libcrypto is required for SHA256
+  libcrypto
 )
 
 if(NOT ANDROID)
@@ -849,6 +851,7 @@ if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
     ${CMAKE_DL_LIBS}
     ${ZLIB_LDFLAGS}
     ${LIBBPF_LDFLAGS}
+    ${LIBCRYPTO_LDFLAGS}
     brotli
     RocksDB::rocksdb-shared
   )
@@ -857,6 +860,7 @@ else()
     ${CMAKE_DL_LIBS}
     ${ZLIB_LDFLAGS}
     ${LIBBPF_LDFLAGS}
+    ${LIBCRYPTO_LDFLAGS}
     brotli
     RocksDB::rocksdb-shared
     Zydis::Zydis

@@ -5,9 +5,13 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <elf.h>
+#include <sys/mman.h>
 #ifdef EXECINFO_BACKTRACE
 #include <execinfo.h>
 #endif
+
+#include <openssl/sha.h>
+
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -34,6 +38,8 @@
 #include <numeric>
 #include <random>
 #include <sstream>
+#include <iomanip>
+#include <ios>
 
 #include "preload/preload_interface.h"
 
@@ -2697,54 +2703,33 @@ bool dir_exists(const std::string& dir) {
 }
 
 // Returns empty string on failure
-std::string sha256sum(const std::string& fsname) {
-  std::string command("sha256sum ");
-  string fsname_esc;
-  fsname_esc.push_back('\'');
-  for (char c : fsname) {
-    if (c == '\'') {
-      fsname_esc.push_back('\\');
-      fsname_esc.push_back('\'');
-    } else if (c == '\\') {
-      fsname_esc.push_back('\\');
-      fsname_esc.push_back('\\');
-    } else {
-      fsname_esc.push_back(c);
-    }
+std::string sha256sum(const ScopedFd& fd) {
+  struct stat st{};
+  if (fstat(fd, &st) < 0) {
+    return {};
   }
-  fsname_esc.push_back('\'');
-  command += fsname_esc + " 2>&1";
-  std::string result;
-  std::string full_response;
-  result.reserve(100);
-  full_response.reserve(100);
-  LOG(info) << "Issuing command `" << command << "`"
-            << "  for `" << fsname << "`";
-  FILE* f = popen(command.c_str(), "r");
-  bool space_encountered = false;
-  while (1) {
-    int ch = fgetc(f);
-    if (ch < 0) {
-      break;
+  const uint8_t* map;
+  uint8_t md_buf[SHA256_DIGEST_LENGTH];
+  if (st.st_size) {
+    map = static_cast<const uint8_t*>(
+        ::mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
+    if (map == MAP_FAILED) {
+      return {};
     }
-    if (ch == ' ') {
-      space_encountered = true;
-    }
-    // sha256sum result has a space after the shasum
-    if (!space_encountered) {
-      result.push_back(ch);
-    }
-    full_response.push_back(ch);
-  }
-  auto error = WaitStatus(pclose(f));
-  if (error.exit_code() == 0) {
-    return result;
+    ::madvise((void*)map, st.st_size, MADV_SEQUENTIAL);
+    SHA256(map, st.st_size, md_buf);
+    ::munmap((void*)map, st.st_size);
   } else {
-    LOG(error) << "`" << command << "` response was: `" << full_response << "`";
-    LOG(error) << "  failed command returned with exit code: "
-               << error.exit_code();
-    return string();
+    // SHA256 for a 0 size file
+    SHA256(NULL, 0, md_buf);
   }
+  stringstream s;
+  for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+    s << std::hex << std::setw(2) << std::setfill('0')
+      << static_cast<int>(md_buf[i]);
+  }
+
+  return s.str();
 }
 
 bool virtual_address_size_supported(uint8_t bits) {

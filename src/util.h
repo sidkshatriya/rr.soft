@@ -705,7 +705,7 @@ std::optional<int> read_perf_event_paranoid();
 
 bool dir_exists(const std::string& dir);
 
-std::string sha256sum(const std::string& fsname);
+std::string sha256sum(const ScopedFd& fd);
 
 bool virtual_address_size_supported(uint8_t bit_size);
 

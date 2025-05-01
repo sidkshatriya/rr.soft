@@ -2615,10 +2615,7 @@ void Monkeypatcher::software_counter_instrument_after_mmap(
     // Assign the unique id, note the type above is an auto&
     maybe_unique_id = unique_id;
   } else {
-    // Access the file in /proc/<tid>/root/<fsname>
-    // This way the file will be visible to rr just like it is to the process
-    unique_id =
-        sha256sum("/proc/" + to_string(t.tid) + "/root/" + map.map.fsname());
+    unique_id = sha256sum(open_fd);
     if (!unique_id.size()) {
       return;
     }
