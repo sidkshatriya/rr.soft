@@ -38,6 +38,7 @@
                   pkgs.lz4
                   pkgs.snappy
                   pkgs.rocksdb
+                  pkgs.openssl
                 ]
                 ++ pkgs.lib.optionals (system == "x86_64-linux") [ pkgs.zydis ]
                 ++ prev.buildInputs;
