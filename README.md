@@ -84,9 +84,9 @@ akin to using statically instrumented ASAN e.g. `-fsanitize=address`
 when compiling your code with `gcc` or `clang`.
 
 Using these plugins to compile your programs is optional when doing
-record/replay; it just speeds things up and provides some additional
-robustness. Dynamic instrumentation is always used as a fallback if the
-code has _not_ been statically instrumented. Dynamic instrumentation
+record/replay; it just provides some additional robustness. Dynamic 
+instrumentation is always used as a fallback if the code has _not_ 
+been statically instrumented. Dynamic instrumentation
 will always be used when recording/replaying the executables/libraries
 of non-gcc/clang compilers like Haskell/OCaml etc. for instance.
 
