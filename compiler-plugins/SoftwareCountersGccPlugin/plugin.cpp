@@ -484,6 +484,11 @@ int plugin_init(struct plugin_name_args *this_plugin,
   struct register_pass_info inserted_pass;
   const char *plugin_name = this_plugin->base_name;
 
+  auto skip_env = getenv("SOFTWARE_COUNTERS_PASS_SKIP");
+  if (skip_env && strcmp(skip_env, "0") && strcmp(skip_env, "")) {
+    return 0;
+  }
+
   old_target_asm_named_section = targetm.asm_out.named_section;
   targetm.asm_out.named_section = plugin_elf_asm_named_section;
 
