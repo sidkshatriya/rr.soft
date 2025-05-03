@@ -320,6 +320,16 @@ struct SoftwareCounters : PassInfoMixin<SoftwareCounters> {
       IsVerbose = false;
     }
 
+    auto SkipEnv = getenv("SOFTWARE_COUNTERS_PASS_SKIP");
+    if (SkipEnv && strcmp(SkipEnv, "0") && strcmp(SkipEnv, "")) {
+      if (IsVerbose) {
+        outs() << "(software-counters) Skipping `" << M.getName()
+               << "` due to environment variable SOFTWARE_COUNTERS_PASS_SKIP being truthy\n";
+      }
+
+      return PreservedAnalyses::all();
+    }
+
     auto VoidTy = Type::getVoidTy(C);
 
     auto DoSoftwareCountFuncType = FunctionType::get(VoidTy, {}, false);
