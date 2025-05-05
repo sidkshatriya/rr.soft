@@ -1,6 +1,6 @@
 # *-* Mode: cmake; *-*
 
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.12)
 
 # Use clang as the default C compiler
 # Software Counters mode instrumentation has been tested the most with it
@@ -801,6 +801,8 @@ if (intel_pt_decoding)
 endif()
 
 add_executable(rr ${RR_SOURCES})
+target_compile_definitions(rr PRIVATE 
+  "FULL_LIBDIR=\"${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\"")
 set_target_properties(rr PROPERTIES ENABLE_EXPORTS true)
 post_build_executable(rr)
 set(RR_BIN rr)
@@ -1727,6 +1729,7 @@ set(TESTS_WITH_PROGRAM
   rr_ps_ns
   rseq
   rseq_syscallbuf
+  rseq_cpu_id_reset_longrunning
   search
   seccomp_blocks_rr
   seccomp_open
