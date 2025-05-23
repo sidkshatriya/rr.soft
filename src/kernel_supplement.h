@@ -506,6 +506,17 @@ enum {
 #define RR_RSEQ_CS_FLAG_NO_RESTART_ON_MIGRATE_BIT 2
 #define RR_RSEQ_CPU_ID_UNINITIALIZED -1
 
+// New in the 5.4 kernel
+#ifndef PR_SET_TAGGED_ADDR_CTRL
+#define PR_SET_TAGGED_ADDR_CTRL 55
+#endif
+#ifndef PR_GET_TAGGED_ADDR_CTRL
+#define PR_GET_TAGGED_ADDR_CTRL 56
+#endif
+#ifndef PR_TAGGED_ADDR_ENABLE
+#define PR_TAGGED_ADDR_ENABLE (1 << 0)
+#endif
+
 // New in the 5.5 kernel
 #ifndef BLKOPENZONE
 #define BLKOPENZONE _IOW(0x12, 134, struct blk_zone_range)
@@ -543,6 +554,11 @@ enum {
 // New in the 6.1 kernel
 #ifndef MEMREAD
 #define MEMREAD _IOWR('M', 26, typename Arch::mtd_read_req)
+#endif
+
+// New in the 6.4 kernel
+#ifndef PR_GET_AUXV
+#define PR_GET_AUXV 0x41555856
 #endif
 
 // Technically not "kernel" constants, exactly, since these are defined

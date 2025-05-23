@@ -1352,6 +1352,7 @@ set(BASIC_TESTS
   ppoll_deliver
   prctl
   prctl_anon_vma_name
+  prctl_auxv
   prctl_caps
   prctl_deathsig
   prctl_name
