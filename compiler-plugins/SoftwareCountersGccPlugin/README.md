@@ -11,7 +11,7 @@ in _Software Counters mode_ `rr`. If your program is not compiled with
 this plugin _Software Counters mode_ `rr` falls back to using dynamic
 instrumentation.
 
-**The plugin can be compiled with gcc 13 and gcc 14 currently**.
+**The plugin can be compiled with gcc 13, gcc 14, gcc 15 currently**.
 
 The plugin depends on `gcc` internals. If you compile the plugin with
 `gcc` 13 then use the plugin with `gcc` 13 only. If you compile the
