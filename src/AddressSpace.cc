@@ -398,7 +398,7 @@ bool AddressSpace::map_software_counter_jump_stub_area(
   {
     AutoRemoteSyscalls remote(&t);
 
-    auto fd = create_memfd_file(SOFT_COUNT_STUB_TEMP_NAME);
+    auto fd = open_memory_file(SOFT_COUNT_STUB_TEMP_NAME);
     ASSERT(&t, fd.is_open());
     resize_shmem_segment(fd, SC_MMAP_AREA);
     int child_fd = remote.infallible_send_fd_if_alive(fd);
