@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "AddressSpace.h"
+#include "CPUs.h"
 #include "MonitoredSharedMemory.h"
 #include "Task.h"
 #include "TaskishUid.h"
@@ -402,7 +403,8 @@ public:
   virtual TraceStream* trace_stream() { return nullptr; }
   TicksSemantics ticks_semantics() const { return ticks_semantics_; }
 
-  virtual int cpu_binding() const;
+  // Must be `UNBOUND` or `SPECIFIED_CORE`.
+  virtual BindCPU cpu_binding() const;
 
   int syscall_number_for_rrcall_init_preload() const {
     return SYS_rrcall_init_preload - RR_CALL_BASE + rrcall_base_;
@@ -441,8 +443,6 @@ public:
   /* Bind the current process to the a CPU as specified in the session options
      or trace */
   void do_bind_cpu();
-
-  cpu_set_t original_affinity() const { return original_affinity_; }
 
   const ThreadGroupMap& thread_group_map() const { return thread_group_map_; }
 
@@ -504,8 +504,6 @@ protected:
   PtraceSyscallBeforeSeccomp syscall_seccomp_ordering_;
 
   TicksSemantics ticks_semantics_;
-
-  cpu_set_t original_affinity_;
 
   /**
    * True if we've done an exec so tracees are now in a state that will be

@@ -8,6 +8,22 @@ static bool supports_txcp;
 /**
  * Return the detected, known microarchitecture of this CPU, or don't
  * return; i.e. never return UnknownCpu.
+ *
+ * Another way to do this would be to read the pmu type under
+ * /sys/devices/.../caps/pmu_name. There are tradeoffs:
+ *   * With the current approach, rr works with old kernels that haven't
+ * been updated with specific knowledge of the CPU type. Reading
+ * `pmu_name`, rr would not work.
+ *   * Reading `pmu_name`, rr would work with new CPUs that use an
+ * existing PMU type, if the kernel is new enough to know about those
+ * CPUs. With the current approach users have to have an rr that has
+ * been updated for those CPUs.
+ * Assuming that it's easier to update rr than update one's kernel,
+ * the current approach seems a little better.
+ *
+ * This detects the overall microarchitecture, which we also use
+ * as the microarchitecture identifier for the P-cores of that architecture
+ * in a hybrid setup.
  */
 static CpuMicroarch compute_cpu_microarch() {
   auto cpuid_vendor = cpuid(CPUID_GETVENDORSTRING, 0);
@@ -71,29 +87,29 @@ static CpuMicroarch compute_cpu_microarch() {
     case 0x706e0:
     case 0x606a0:
     case 0x80660:
-      return IntelIcelake;
+      return IntelIceLake;
     case 0x806c0:
     case 0x806d0:
-      return IntelTigerlake;
+      return IntelTigerLake;
     case 0x806e0:
     case 0x906e0:
-      return IntelKabylake;
+      return IntelKabyLake;
     case 0xa0650:
     case 0xa0660:
-      return IntelCometlake;
+      return IntelCometLake;
     case 0xa0670:
-      return IntelRocketlake;
+      return IntelRocketLake;
     case 0x90670:
     case 0x906a0:
-      return IntelAlderlake;
+      return IntelAlderLake;
     case 0xb0670:
     case 0xb06a0:
     case 0xb06f0:
-      return IntelRaptorlake;
+      return IntelRaptorLake;
     case 0x806f0:
-      return IntelSapphireRapid;
+      return IntelSapphireRapids;
     case 0xc06f0:
-      return IntelEmeraldRapid;
+      return IntelEmeraldRapids;
     case 0xa06a0:
       return IntelMeteorLake;
     case 0xb06d0:
@@ -160,8 +176,76 @@ static CpuMicroarch compute_cpu_microarch() {
   return UnknownCpu; // not reached
 }
 
-static std::vector<CpuMicroarch> compute_cpu_microarchs() {
-  return { compute_cpu_microarch() };
+static vector<CPUInfo> compute_cpus_info() {
+  vector<CPUInfo> result;
+  auto groups = CPUs::get().cpu_groups();
+  if (groups.empty()) {
+    // Only one kind of CPU core.
+    result.push_back({compute_cpu_microarch(), PERF_TYPE_RAW});
+    return result;
+  }
+
+  for (int cpu : CPUs::get().initial_affinity()) {
+    if (cpu < static_cast<int>(result.size()) &&
+        result[cpu].microarch != UnknownCpu) {
+      // This cpu belongs to a group we already computed the microarch for.
+      // Using groups like this lets us avoid having to schedule this thread
+      // on every single CPU in the system.
+      continue;
+    }
+    while (static_cast<int>(result.size()) < cpu) {
+      result.push_back({UnknownCpu, PERF_TYPE_RAW});
+    }
+    if (!CPUs::set_affinity_to_cpu(cpu)) {
+      FATAL() << "Can't set affinity to previously allowed CPU";
+    }
+    CpuMicroarch uarch = compute_cpu_microarch();
+    // May be overwritten below if this is part of a known hybrid core grouping.
+    result.push_back({uarch, PERF_TYPE_RAW});
+    // Fill in `result` for all CPUs in the same group as the current CPU.
+    // This avoids having to schedule this thread on every single CPU in the
+    // system.
+    for (auto group : groups) {
+      if (group.start_cpu <= cpu && cpu < group.end_cpu) {
+        result.resize(group.end_cpu);
+        if (group.name == "atom") {
+          switch (uarch) {
+          case IntelAlderLake:
+          case IntelRaptorLake:
+            uarch = IntelGracemont;
+            break;
+          case IntelMeteorLake:
+            uarch = IntelCrestmont;
+            break;
+          case IntelLunarLake:
+          case IntelArrowLake:
+            // Some Arrow Lakes use Crestmont E-cores maybe? Hopefully doesn't matter
+            // for the PMU.
+            uarch = IntelSkymont;
+            break;
+          default:
+            FATAL() << "Atom architecture detected but not known for " << uarch;
+          }
+        } else if (group.name == "lowpower") {
+          switch (uarch) {
+          case IntelArrowLake:
+            uarch = IntelCrestmont;
+            break;
+          default:
+            FATAL() << "Lowpower architecture detected but not known for " << uarch;
+          }
+        } else if (group.name != "core") {
+          FATAL() << "Hybrid architecture group name not known: " << group.name;
+        }
+        for (int i = group.start_cpu; i < group.end_cpu; ++i) {
+          result[i] = {uarch, group.type};
+        }
+        break;
+      }
+    }
+  }
+  CPUs::get().restore_initial_affinity();
+  return result;
 }
 
 static void check_for_kvm_in_txcp_bug(const perf_event_attrs &perf_attr) {
@@ -400,14 +484,14 @@ static void check_for_freeze_on_smi() {
   }
 }
 
+// Must be run on the CPU where we're checking for bugs.
 static void check_for_arch_bugs(perf_event_attrs &perf_attr) {
-  DEBUG_ASSERT(rr::perf_attrs.size() == 1);
   CpuMicroarch uarch = (CpuMicroarch)perf_attr.bug_flags;
   if (uarch >= FirstIntel && uarch <= LastIntel) {
     check_for_kvm_in_txcp_bug(perf_attr);
     check_for_xen_pmi_bug(perf_attr);
   }
-  if (uarch >= IntelCometlake && uarch <= LastIntel) {
+  if (uarch >= IntelCometLake && uarch <= LastIntel) {
     check_for_freeze_on_smi();
   }
   if (uarch >= AMDZen && uarch <= LastAMD) {
@@ -415,12 +499,8 @@ static void check_for_arch_bugs(perf_event_attrs &perf_attr) {
   }
 }
 
-static void post_init_pmu_uarchs(std::vector<PmuConfig> &pmu_uarchs)
-{
-  if (pmu_uarchs.size() != 1) {
-    CLEAN_FATAL() << "rr only support a single PMU on x86, "
-                  << pmu_uarchs.size() << " specified.";
-  }
+static void post_init_pmu_uarchs(std::vector<PmuConfig> &) {
+
 }
 
 static bool always_recreate_counters(const perf_event_attrs &perf_attr) {
@@ -443,10 +523,9 @@ static void arch_check_restricted_counter() {
 }
 
 template <typename Arch>
-void PerfCounters::reset_arch_extras() {
-  DEBUG_ASSERT(rr::perf_attrs.size() == 1);
+void PerfCounters::reset_arch_extras(int pmu_index) {
   if (supports_txcp) {
-    struct perf_event_attr attr = rr::perf_attrs[0].ticks;
+    struct perf_event_attr attr = rr::perf_attrs[pmu_index].ticks;
     if (has_kvm_in_txcp_bug) {
       // IN_TXCP isn't going to work reliably. Assume that HLE/RTM are not
       // used,

@@ -35,17 +35,19 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <string>
 #include <numeric>
 #include <random>
 #include <sstream>
 #include <iomanip>
 #include <ios>
+#include <string>
+#include <unordered_set>
 
 #include "preload/preload_interface.h"
 
 #include "AddressSpace.h"
 #include "AutoRemoteSyscalls.h"
+#include "CPUs.h"
 #include "Flags.h"
 #include "PerfCounters.h"
 #include "ReplaySession.h"
@@ -1922,39 +1924,8 @@ TempFile create_temporary_file(const char* pattern) {
   return result;
 }
 
-ScopedFd create_memfd_file(const string &real_name) {
-  ScopedFd fd(syscall(SYS_memfd_create, real_name.c_str(), 0));
-  return fd;
-}
-
-static void replace_char(string& s, char c, char replacement) {
-  size_t i = 0;
-  while (string::npos != (i = s.find(c, i))) {
-    s[i] = replacement;
-  }
-}
-
-// Used only when memfd_create is not available, i.e. Linux < 3.17
-static ScopedFd create_tmpfs_file(const string &real_name) {
-  std::string name = real_name;
-  replace_char(name, '/', '\\');
-  name = string(tmp_dir()) + '/' + name;
-  name = name.substr(0, 255);
-
-  ScopedFd fd =
-      ScopedFd(name.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0700);
-  /* Remove the fs name so that we don't have to worry about
-   * cleaning up this segment in error conditions. */
-  unlink(name.c_str());
-  return fd;
-}
-
-ScopedFd open_memory_file(const std::string &name)
-{
-  ScopedFd fd(create_memfd_file(name));
-  if (!fd.is_open()) {
-    fd = create_tmpfs_file(name);
-  }
+ScopedFd open_memory_file(const std::string &name) {
+  ScopedFd fd(syscall(SYS_memfd_create, name.c_str(), 0));
   return fd;
 }
 
@@ -1983,15 +1954,6 @@ vector<string> current_env() {
     env.push_back(*envp);
   }
   return env;
-}
-
-int get_num_cpus() {
-  cpu_set_t affinity_mask;
-  int ret = sched_getaffinity(0, sizeof(affinity_mask), &affinity_mask);
-  if (ret < 0) {
-    FATAL() << "sched_getaffinity failed";
-  }
-  return CPU_COUNT(&affinity_mask);
 }
 
 const uint8_t rdtsc_insn[2] = { 0x0f, 0x31 };
@@ -2109,32 +2071,39 @@ string get_cpu_lock_file() {
   return lock_file ? lock_file : trace_save_dir() + "/cpu_lock";
 }
 
+// Restrict `cpus` to those that are P-cores, if any are P-cores
+static void filter_for_perf_cores(vector<int>& cpus) {
+  const vector<CPUGroup>& groups = CPUs::get().cpu_groups();
+  unordered_set<int> p_cores;
+  for (const auto& group : groups) {
+    if (group.kind == CPUGroup::P_CORE) {
+      for (int cpu = group.start_cpu; cpu < group.end_cpu; ++cpu) {
+        p_cores.insert(cpu);
+      }
+    }
+  }
+  if (p_cores.empty()) {
+    return;
+  }
+
+  vector<int> result;
+  for (int cpu : cpus) {
+    if (p_cores.find(cpu) != p_cores.end()) {
+      result.push_back(cpu);
+    }
+  }
+  if (!result.empty()) {
+    cpus = result;
+  }
+}
+
 /**
  * Pick a CPU at random to bind to, unless --cpu-unbound has been given,
  * in which case we return -1.
  */
 int choose_cpu(BindCPU bind_cpu, ScopedFd &cpu_lock_fd_out) {
-  if (bind_cpu == UNBOUND_CPU) {
+  if (bind_cpu.mode == BindCPU::UNBOUND) {
     return -1;
-  }
-
-  // Find out which CPUs we're allowed to run on at all.
-  // sched_getaffinity intersects the task's `cpu_mask`
-  // (/proc/.../status Cpus_allowed_list) with `cpu_active_mask`
-  // which is almost the same as /sys/devices/system/cpu/online
-  cpu_set_t affinity_mask;
-  int ret = sched_getaffinity(0, sizeof(affinity_mask), &affinity_mask);
-  if (ret < 0) {
-    FATAL() << "sched_getaffinity failed";
-  }
-  std::vector<int> cpus;
-  for (int i = 0; i < CPU_SETSIZE; ++i) {
-    if (CPU_ISSET(i, &affinity_mask) && PerfCounters::support_cpu(i)) {
-      cpus.push_back(i);
-    }
-  }
-  if (cpus.empty()) {
-    FATAL() << "Can't find a valid CPU to run on";
   }
 
   // When many copies of rr are running on the same machine, it's easy for them
@@ -2172,12 +2141,12 @@ int choose_cpu(BindCPU bind_cpu, ScopedFd &cpu_lock_fd_out) {
   // performance win in certain circumstances,
   // presumably due to cheaper context switching and/or
   // better interaction with CPU frequency scaling.
-  if (bind_cpu >= 0) {
+  if (bind_cpu.mode == BindCPU::SPECIFIED_CORE) {
     if (cpu_lock_fd_out.is_open()) {
       struct flock lock {
         .l_type = F_WRLCK,
         .l_whence = SEEK_SET,
-        .l_start = bind_cpu,
+        .l_start = bind_cpu.specified_core,
         .l_len = 1,
         .l_pid = 0
       };
@@ -2185,13 +2154,22 @@ int choose_cpu(BindCPU bind_cpu, ScopedFd &cpu_lock_fd_out) {
       (void)fcntl(cpu_lock_fd_out, F_SETLK, &lock);
       // Ignore fcntl errors - nothing we can do
     }
-    return bind_cpu;
+    return bind_cpu.specified_core;
+  }
+
+  vector<int> cpus = CPUs::get().initial_affinity();
+  if (cpus.empty()) {
+    FATAL() << "Can't find a valid CPU to run on";
+  }
+
+  if (bind_cpu.mode == BindCPU::PREFER_PERF_CORE) {
+    filter_for_perf_cores(cpus);
   }
 
   if (cpu_lock_fd_out.is_open()) {
     // Try twice to allocate a CPU. If we fail twice, pick a random one
     for (int i = 0; i < 2; ++i) {
-      std::shuffle (cpus.begin(), cpus.end(), std::default_random_engine(random()));
+      shuffle(cpus.begin(), cpus.end(), default_random_engine(random()));
       for (int cpu : cpus) {
         struct flock lock {
           .l_type = F_WRLCK,

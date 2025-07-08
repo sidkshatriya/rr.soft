@@ -463,6 +463,11 @@ SYSCALLHOOK_START(_syscall_hook_trampoline_48_3d_00_f0_ff_ff)
         cmpq $0xfffffffffffff000,%rax
 SYSCALLHOOK_END(_syscall_hook_trampoline_48_3d_00_f0_ff_ff)
 
+SYSCALLHOOK_START(_syscall_hook_trampoline_48_85_c0)
+        callq __morestack
+        test %rax,%rax
+SYSCALLHOOK_END(_syscall_hook_trampoline_48_85_c0)
+
 SYSCALLHOOK_START(_syscall_hook_trampoline_3d_00_f0_ff_ff)
         callq __morestack
         cmpl $0xfffff000,%eax
@@ -484,6 +489,20 @@ SYSCALLHOOK_START(_syscall_hook_trampoline_48_8b_3c_24)
          movq 8(%rsp),%rdi
          movq (%rdi),%rdi
 SYSCALLHOOK_END(_syscall_hook_trampoline_48_8b_3c_24)
+
+SYSCALLHOOK_START(_syscall_hook_trampoline_4c_8b_0d)
+        callq __morestack
+        push %rax
+        push %rbx
+        /* Get return address into %rbx */
+        mov 16(%rsp),%rbx
+        /* Get PC-relative offset of patched instruction into %eax */
+        mov -4(%rbx),%eax
+        movsx %eax,%rax
+        mov (%rbx,%rax),%r9
+        pop %rbx
+        pop %rax
+SYSCALLHOOK_END(_syscall_hook_trampoline_4c_8b_0d)
 
 SYSCALLHOOK_START(_syscall_hook_trampoline_5a_5e_c3)
         .cfi_offset %rip, 16
@@ -644,6 +663,11 @@ SYSCALLHOOK_START(_syscall_hook_trampoline_48_89_e5)
         mov 8(%rsp),%rbp
         callq __morestack
 SYSCALLHOOK_END(_syscall_hook_trampoline_48_89_e5)
+
+SYSCALLHOOK_START(_syscall_hook_trampoline_48_8b_45_10)
+        mov    0x10(%rbp),%rax
+        callq __morestack
+SYSCALLHOOK_END(_syscall_hook_trampoline_48_8b_45_10)
 
 SYSCALLHOOK_START(_syscall_hook_trampoline_48_89_fb)
         mov %rdi,%rbx

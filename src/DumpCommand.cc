@@ -363,6 +363,7 @@ static void dump_events_matching(TraceReader& trace, const DumpFlags& flags,
               if (!first) {
                 fputs(", ", out);
               }
+              first = false;
               fprintf(out, "%p-%p", (void*)h.offset, (void*)(h.offset + h.size));
             }
             fputs("]", out);

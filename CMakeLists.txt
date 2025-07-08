@@ -679,6 +679,7 @@ set(RR_SOURCES
   src/ContextSwitchEvent.cc
   src/CPUFeaturesCommand.cc
   src/CPUIDBugDetector.cc
+  src/CPUs.cc
   src/DiversionSession.cc
   src/DumpCommand.cc
   src/Dwarf.cc
@@ -1276,6 +1277,7 @@ set(BASIC_TESTS
   mlock
   mlock_madvise
   mmap_adjacent_to_rr_usage
+  mmap_huge
   mmap_private
   mmap_private_grow_under_map
   mmap_recycle
@@ -1709,6 +1711,7 @@ set(TESTS_WITH_PROGRAM
   pack
   patch_page_end
   x86/patch_40_80_f6_81
+  x86/patch_pc_rel
   prctl_tsc
   priority
   ptrace_remote_unmap
@@ -1862,6 +1865,7 @@ set(TESTS_WITHOUT_PROGRAM
   pack_dir
   parent_no_break_child_bkpt
   parent_no_stop_child_crash
+  personality_chaos
   post_exec_fpu_regs
   proc_maps
   read_bad_mem

@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "CPUs.h"
 #include "PerfCounterBuffers.h"
 #include "ScopedFd.h"
 #include "Ticks.h"
@@ -64,7 +65,8 @@ public:
     PT_DISABLE,
     PT_ENABLE
   };
-  PerfCounters(pid_t tid, int cpu_binding, TicksSemantics ticks_semantics,
+  // `cpu_binding` must be `UNBOUND` or `SPECIFIED_CORE`.
+  PerfCounters(pid_t tid, BindCPU cpu_binding, TicksSemantics ticks_semantics,
                Enabled enabled, IntelPTEnabled enable_pt);
   ~PerfCounters() { close(); }
 
@@ -201,7 +203,7 @@ public:
 #endif
 
 private:
-  template <typename Arch> void reset_arch_extras();
+  template <typename Arch> void reset_arch_extras(int pmu_index);
 
   /**
    * Use a separate skid_size for recording since we seem to see more skid
@@ -228,6 +230,7 @@ private:
   // Only valid while 'counting' is true
   Ticks counting_period;
   pid_t tid;
+  // Either 0 or the cpu index. Used to index into `perf_attrs`.
   int pmu_index;
   // We use separate fds for counting ticks and for generating interrupts. The
   // former ignores ticks in aborted transactions, and does not support

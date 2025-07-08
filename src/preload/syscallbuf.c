@@ -804,6 +804,7 @@ static void __attribute__((constructor)) init_process(void) {
   extern RR_HIDDEN void _syscall_hook_trampoline_48_3d_01_f0_ff_ff(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_48_3d_00_f0_ff_ff(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_3d_00_f0_ff_ff(void);
+  extern RR_HIDDEN void _syscall_hook_trampoline_48_85_c0(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_48_8b_3c_24(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_48_89_45_f8(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_48_89_c3(void);
@@ -825,8 +826,10 @@ static void __attribute__((constructor)) init_process(void) {
   extern RR_HIDDEN void _syscall_hook_trampoline_b8_11_01_00_00(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_b8_ca_00_00_00(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_be_18_00_00_00(void);
+  extern RR_HIDDEN void _syscall_hook_trampoline_4c_8b_0d(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_48_89_e5(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_48_89_fb(void);
+  extern RR_HIDDEN void _syscall_hook_trampoline_48_8b_45_10(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_48_8d_b3_f0_08_00_00(void);
   extern RR_HIDDEN void _syscall_hook_trampoline_nops(void);
 
@@ -873,6 +876,11 @@ static void __attribute__((constructor)) init_process(void) {
       5,
       { 0x3d, 0x00, 0xf0, 0xff, 0xff },
       (uintptr_t)_syscall_hook_trampoline_3d_00_f0_ff_ff },
+    /* Some application has'syscall' followed by 'test %rax,%rax' */
+    { 0,
+      3,
+      { 0x48, 0x85, 0xc0 },
+      (uintptr_t)_syscall_hook_trampoline_48_85_c0 },
     /* Many glibc syscall wrappers (e.g. read) have 'syscall' followed
      * by
      * mov (%rsp),%rdi (in glibc-2.18-16.fc20.x86_64) */
@@ -981,6 +989,12 @@ static void __attribute__((constructor)) init_process(void) {
       { 0x##rex, 0x89, 0x##op }, \
       (uintptr_t)_syscall_hook_trampoline_##rex##_89_##op },
     MOV_RDX_VARIANTS
+    /* Some application has RDTSC followed by 'mov xxxxxx(%rip),%r9' */
+    {
+      PATCH_NO_MATCH_TRAILING_4_BYTES,
+      7,
+      { 0x4c, 0x8b, 0x0d },
+      (uintptr_t)_syscall_hook_trampoline_4c_8b_0d },
     /* Some application has RDTSC followed by 'shl $32,%rdx' */
     {
       0,
@@ -1047,6 +1061,11 @@ static void __attribute__((constructor)) init_process(void) {
       3,
       { 0x48, 0x89, 0xfb },
       (uintptr_t)_syscall_hook_trampoline_48_89_fb },
+    /* glibc-2.41-5.fc42.x86_64 has 'mov 0x10(%rbp),%rax' followed by 'syscall' */
+    { PATCH_SYSCALL_INSTRUCTION_IS_LAST,
+      4,
+      { 0x48, 0x8b, 0x45, 0x10 },
+      (uintptr_t)_syscall_hook_trampoline_48_8b_45_10 },
     /* Support explicit 5 byte nop (`nopl 0(%ax, %ax, 1)`) before 'rdtsc' or syscall (may ignore interfering branches) */
     { PATCH_SYSCALL_INSTRUCTION_IS_LAST |
       PATCH_IS_NOP_INSTRUCTIONS,

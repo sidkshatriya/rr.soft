@@ -75,6 +75,7 @@
 
 #include "AutoRemoteSyscalls.h"
 #include "BpfMapMonitor.h"
+#include "CPUs.h"
 #include "DiversionSession.h"
 #include "ElfReader.h"
 #include "FileMonitor.h"
@@ -3755,8 +3756,7 @@ static pid_t do_detach_teleport(RecordTask *t)
   // restore that.
   // For now honor whatever affinity rr itself has (e.g. for running on P-cores
   // on Alder Lake).
-  cpu_set_t mask = t->session().original_affinity();
-  syscall(SYS_sched_setaffinity, new_t->tid, sizeof(mask), &mask);
+  CPUs::get().restore_initial_affinity(new_t->tid);
   // Task::spawn my lave the task in a group-stop if the task SIGSTOPs itself
   // before we can PTRACE_SEIZE it. Kick it out of that group-stop now.
   ::kill(new_tid, SIGCONT);
@@ -5260,12 +5260,10 @@ static Switchable rec_prepare_syscall_arch(RecordTask* t,
       }
 
       if (t->session().enable_chaos()) {
-        // XXX fix this to actually disable chaos mode ASLR?
-        ASSERT(t,
-               !(p & (ADDR_COMPAT_LAYOUT | ADDR_NO_RANDOMIZE |
-                      ADDR_LIMIT_32BIT | ADDR_LIMIT_3GB)))
-            << "Personality value " << HEX(p)
-            << " not compatible with chaos mode address-space randomization";
+        bool disable_randomize =
+          (p & (ADDR_COMPAT_LAYOUT | ADDR_NO_RANDOMIZE |
+                ADDR_LIMIT_32BIT | ADDR_LIMIT_3GB)) != 0;
+        t->vm()->disable_layout_randomization(disable_randomize);
       }
       if (p & 0xffffff00 &
           ~(ADDR_COMPAT_LAYOUT | ADDR_NO_RANDOMIZE | ADDR_LIMIT_32BIT |

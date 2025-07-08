@@ -13,6 +13,7 @@
 #include "rr/rr.h"
 
 #include "AutoRemoteSyscalls.h"
+#include "CPUs.h"
 #include "EmuFs.h"
 #include "Flags.h"
 #include "PerfCounters.h"
@@ -77,7 +78,6 @@ Session::Session(const Session& other)
       syscallbuf_hdr_size_(other.syscallbuf_hdr_size_),
       syscall_seccomp_ordering_(other.syscall_seccomp_ordering_),
       ticks_semantics_(other.ticks_semantics_),
-      original_affinity_(other.original_affinity_),
       done_initial_exec_(other.done_initial_exec_),
       visible_execution_(other.visible_execution_),
       intel_pt_(other.intel_pt_) {}
@@ -757,25 +757,12 @@ bool Session::has_cpuid_faulting() {
   return !Flags::get().disable_cpuid_faulting && cpuid_faulting_works();
 }
 
-int Session::cpu_binding() const {
-  return const_cast<Session*>(this)->trace_stream()->bound_to_cpu();
-}
-
-// Returns true if we succeeded, false if we failed because the
-// requested CPU does not exist/is not available.
-static bool set_cpu_affinity(int cpu) {
-  DEBUG_ASSERT(cpu >= 0);
-
-  cpu_set_t mask;
-  CPU_ZERO(&mask);
-  CPU_SET(cpu, &mask);
-  if (0 > sched_setaffinity(0, sizeof(mask), &mask)) {
-    if (errno == EINVAL) {
-      return false;
-    }
-    FATAL() << "Couldn't bind to CPU " << cpu;
+BindCPU Session::cpu_binding() const {
+  int binding = const_cast<Session*>(this)->trace_stream()->bound_to_cpu();
+  if (binding < 0) {
+    return BindCPU(BindCPU::UNBOUND);
   }
-  return true;
+  return BindCPU(binding);
 }
 
 void Session::do_bind_cpu() {
@@ -783,19 +770,20 @@ void Session::do_bind_cpu() {
     PerfCounters::start_pt_copy_thread();
   }
 
-  sched_getaffinity(0, sizeof(original_affinity_), &original_affinity_);
-
-  int cpu_index = this->cpu_binding();
-  if (cpu_index >= 0) {
+  // Ensure initial affinity is initialized.
+  const CPUs& cpus = CPUs::get();
+  BindCPU binding = this->cpu_binding();
+  if (binding.mode == BindCPU::SPECIFIED_CORE) {
     // Set CPU affinity now, after we've created any helper threads
     // (so they aren't affected), but before we create any
     // tracees (so they are all affected).
     // Note that we're binding rr itself to the same CPU as the
     // tracees, since this seems to help performance.
-    if (!set_cpu_affinity(cpu_index)) {
+    if (!cpus.set_affinity_to_cpu(binding.specified_core)) {
       if (has_cpuid_faulting() && !is_recording()) {
-        cpu_index = choose_cpu(BIND_CPU, cpu_lock);
-        if (!set_cpu_affinity(cpu_index)) {
+        // We can replay on any CPU.
+        int cpu_index = choose_cpu(BindCPU(BindCPU::ANY), cpu_lock);
+        if (!cpus.set_affinity_to_cpu(cpu_index)) {
           FATAL() << "Can't bind to requested CPU " << cpu_index
                   << " even after we re-selected it";
         }
@@ -805,12 +793,12 @@ void Session::do_bind_cpu() {
                   << "Hoping tracee doesn't use LSL instruction!";
         trace_stream()->set_bound_cpu(cpu_index);
       } else {
-        FATAL() << "Can't bind to requested CPU " << cpu_index
+        FATAL() << "Can't bind to requested CPU " << binding.specified_core
                 << ", and CPUID faulting not available";
       }
     } else if (!is_recording()) {
       // Make sure to mark this CPU as in use in the cpu_lock.
-      (void)choose_cpu((BindCPU)cpu_index, cpu_lock);
+      (void)choose_cpu(binding, cpu_lock);
     }
   }
 }
