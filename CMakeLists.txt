@@ -802,7 +802,7 @@ if (intel_pt_decoding)
 endif()
 
 add_executable(rr ${RR_SOURCES})
-target_compile_definitions(rr PRIVATE 
+target_compile_definitions(rr PRIVATE
   "FULL_LIBDIR=\"${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\"")
 set_target_properties(rr PROPERTIES ENABLE_EXPORTS true)
 post_build_executable(rr)
@@ -1243,6 +1243,7 @@ set(BASIC_TESTS
   ioctl_pty
   ioctl_sg
   ioctl_tty
+  ioctl_ttyS
   ioctl_vt
   ioprio
   x86/ioperm
@@ -1848,6 +1849,7 @@ set(TESTS_WITHOUT_PROGRAM
   exec_stop
   execp
   explicit_checkpoint_clone
+  fd_leak
   file_name_newline
   final_sigkill
   first_instruction
@@ -1914,6 +1916,7 @@ set(TESTS_WITHOUT_PROGRAM
   trace_version
   term_trace_cpu
   trace_events
+  traceinfo
   transient_fault_replay_all
   tty
   unmap_vdso
@@ -2124,7 +2127,7 @@ if(BUILD_TESTS)
       bash source_dir/src/test/${test}.run ${testname} -n bin_dir ${TEST_MONITOR_DEFAULT_TIMEOUT})
     configure_test(${test}-no-syscallbuf)
   endforeach(test)
-  
+
   # Run 32-bit tests on 64-bit builds.
   # We copy the test files into '32' subdirectories in the output
   # directory, so we can set different compile options on them.

@@ -1797,10 +1797,14 @@ static Switchable prepare_ioctl(RecordTask* t,
     case BLKALIGNOFF:
     case KDGKBMODE:
     case RNDGETENTCNT:
-    case TIOCINQ: // == FIONREAD
+    case TIOCINQ: // == FIONREAD == SIOCOUTQ
     case TIOCOUTQ:
     case TIOCGETD:
+    case TIOCMGET:
+    case TIOCMSET:
+    case TIOCSERGETLSR:
     case VT_OPENQRY:
+    case SIOCOUTQNSD:
       syscall_state.reg_parameter<int>(3);
       return PREVENT_SWITCH;
 
@@ -1849,6 +1853,10 @@ static Switchable prepare_ioctl(RecordTask* t,
       syscall_state.reg_parameter<typename Arch::serial_struct>(3);
       return PREVENT_SWITCH;
     case TIOCSSERIAL:
+      return PREVENT_SWITCH;
+
+    case TIOCGICOUNT:
+      syscall_state.reg_parameter<typename Arch::serial_icounter_struct>(3);
       return PREVENT_SWITCH;
 
     case SNDRV_CTL_IOCTL_PVERSION:
@@ -6557,7 +6565,7 @@ static bool is_rr_terminal(const string& pathname) {
 static int dev_tty_fd() {
   static int fd = -1;
   if (fd < 0) {
-    fd = open("/dev/tty", O_WRONLY);
+    fd = open("/dev/tty", O_WRONLY | O_CLOEXEC);
   }
   return fd;
 }
