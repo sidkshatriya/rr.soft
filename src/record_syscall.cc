@@ -102,6 +102,13 @@
 #include "log.h"
 #include "util.h"
 
+// muslc defines those, but we want a typedef instead
+#if defined(loff_t)
+typedef loff_t __musl_loff_t;
+#undef loff_t
+typedef __musl_loff_t loff_t;
+#endif
+
 using namespace std;
 
 #ifndef HAVE_TERMIOS2
@@ -1793,6 +1800,10 @@ static Switchable prepare_ioctl(RecordTask* t,
       syscall_state.reg_parameter<typename Arch::termio>(3);
       return PREVENT_SWITCH;
 
+    case TIOCLINUX:
+      syscall_state.reg_parameter<char>(3);
+      return PREVENT_SWITCH;
+
     case BLKSSZGET:
     case BLKALIGNOFF:
     case KDGKBMODE:
@@ -3333,11 +3344,10 @@ static void prepare_exit(RecordTask* t) {
 
   Registers r = t->regs();
   Registers exit_regs = r;
+  SupportedArch arch = t->ev().Syscall().arch();
   ASSERT(t,
-         is_exit_syscall(exit_regs.original_syscallno(),
-                         t->ev().Syscall().arch()) ||
-             is_exit_group_syscall(exit_regs.original_syscallno(),
-                                   t->ev().Syscall().arch()))
+         is_exit_syscall(exit_regs.original_syscallno(), arch) ||
+             is_exit_group_syscall(exit_regs.original_syscallno(), arch))
       << "Tracee should have been at exit/exit_group, but instead at "
       << t->ev().Syscall().syscall_name();
 
@@ -3352,7 +3362,7 @@ static void prepare_exit(RecordTask* t) {
   // anymore.
   //
   // So hijack this SYS_exit call and rewrite it into a SYS_rt_sigprocmask.
-  r.set_original_syscallno(syscall_number_for_rt_sigprocmask(t->arch()));
+  r.set_original_syscallno(syscall_number_for_rt_sigprocmask(arch));
   r.set_arg1(SIG_BLOCK);
   r.set_arg2(AddressSpace::rr_page_record_ff_bytes());
   r.set_arg3(0);
@@ -3360,7 +3370,7 @@ static void prepare_exit(RecordTask* t) {
   t->set_regs(r);
   // This exits the SYS_rt_sigprocmask.  Now the tracee is ready to do our
   // bidding.
-  t->exit_syscall();
+  t->exit_syscall(arch);
   check_signals_while_exiting(t);
 
   // Do the actual buffer and fd cleanup.
@@ -3373,12 +3383,12 @@ static void prepare_exit(RecordTask* t) {
   // cleanup, we'll restart the call.
   exit_regs.set_syscallno(exit_regs.original_syscallno());
   exit_regs.set_original_syscallno(-1);
-  exit_regs.set_ip(exit_regs.ip() - syscall_instruction_length(t->arch()));
+  exit_regs.set_ip(exit_regs.ip() - syscall_instruction_length(arch));
   ASSERT(t, is_at_syscall_instruction(t, exit_regs.ip()))
       << "Tracee should have entered through int $0x80.";
   // Restart the SYS_exit call.
   t->set_regs(exit_regs);
-  t->enter_syscall();
+  t->enter_syscall(arch);
   check_signals_while_exiting(t);
 
   if (t->emulated_ptrace_options & PTRACE_O_TRACEEXIT) {
@@ -3514,7 +3524,7 @@ static Switchable prepare_clone(RecordTask* t, TaskSyscallState& syscall_state) 
   int ptrace_event;
   int termination_signal = SIGCHLD;
 
-  if (is_clone_syscall(original_syscall, r.arch())) {
+  if (is_clone_syscall(original_syscall, Arch::arch())) {
     params = extract_clone_parameters(t);
     flags = r.arg1();
     r.set_arg1(flags & ~uintptr_t(CLONE_UNTRACED));
@@ -3527,7 +3537,7 @@ static Switchable prepare_clone(RecordTask* t, TaskSyscallState& syscall_state) 
     } else {
       ptrace_event = PTRACE_EVENT_CLONE;
     }
-  } else if (is_vfork_syscall(original_syscall, r.arch())) {
+  } else if (is_vfork_syscall(original_syscall, Arch::arch())) {
     ptrace_event = PTRACE_EVENT_VFORK;
     flags = CLONE_VM | CLONE_VFORK | SIGCHLD;
   } else {
@@ -3557,23 +3567,23 @@ static Switchable prepare_clone(RecordTask* t, TaskSyscallState& syscall_state) 
       // Restore register we might have changed
       r.set_arg1(syscall_state.syscall_entry_registers.arg1());
       r.set_syscallno(Arch::gettid);
-      r.set_ip(r.ip().decrement_by_syscall_insn_length(r.arch()));
+      r.set_ip(r.ip().decrement_by_syscall_insn_length(Arch::arch()));
       t->set_regs(r);
-      t->enter_syscall();
+      t->enter_syscall(Arch::arch());
       r.set_ip(t->regs().ip());
       r.set_syscallno(original_syscall);
       r.set_original_syscallno(original_syscall);
       t->set_regs(r);
-      t->canonicalize_regs(t->arch());
+      t->canonicalize_regs(Arch::arch());
       return ALLOW_SWITCH;
     }
     // Reenter the syscall. If we try to return an ERESTART* error using the
     // code path above, our set_syscallno(SYS_gettid) fails to take effect and
     // we actually do the clone, and things get horribly confused.
     r.set_syscallno(r.original_syscallno());
-    r.set_ip(r.ip().decrement_by_syscall_insn_length(r.arch()));
+    r.set_ip(r.ip().decrement_by_syscall_insn_length(Arch::arch()));
     t->set_regs(r);
-    t->enter_syscall();
+    t->enter_syscall(Arch::arch());
   }
 
   ASSERT(t, t->ptrace_event() == ptrace_event);
@@ -3589,7 +3599,7 @@ static Switchable prepare_clone(RecordTask* t, TaskSyscallState& syscall_state) 
       syscall_state.syscall_entry_registers.original_syscallno());
   new_r.set_orig_arg1(syscall_state.syscall_entry_registers.arg1());
   new_task->set_regs(new_r);
-  new_task->canonicalize_regs(new_task->arch());
+  new_task->canonicalize_regs(Arch::arch());
   new_task->set_termination_signal(termination_signal);
   // If the task got killed right away, we need to treat this
   // as if we are just finished a syscall
@@ -3643,7 +3653,7 @@ static Switchable prepare_clone(RecordTask* t, TaskSyscallState& syscall_state) 
   r.set_original_syscallno(
       syscall_state.syscall_entry_registers.original_syscallno());
   t->set_regs(r);
-  t->canonicalize_regs(t->arch());
+  t->canonicalize_regs(Arch::arch());
 
   // We're in a PTRACE_EVENT_FORK/VFORK/CLONE so the next PTRACE_SYSCALL for
   // |t| will go to the exit of the syscall, as expected.
@@ -5404,7 +5414,7 @@ static Switchable rec_prepare_syscall_arch(RecordTask* t,
         return PREVENT_SWITCH;
       }
 
-      t->exit_syscall();
+      t->exit_syscall(Arch::arch());
       pid_t new_tid = do_detach_teleport(t);
 
       // Leave the proxy where it is --- just exited the detach_teleport
@@ -5658,7 +5668,7 @@ static void rec_prepare_restart_syscall_arch(RecordTask* t,
       r.set_original_syscallno(
           syscall_state.syscall_entry_registers.original_syscallno());
       t->set_regs(r);
-      t->canonicalize_regs(t->arch());
+      t->canonicalize_regs(Arch::arch());
       t->in_wait_type = WAIT_TYPE_NONE;
       t->in_wait_options = 0;
       break;
@@ -6037,8 +6047,8 @@ static void process_execve(RecordTask* t, TaskSyscallState& syscall_state) {
                                               TraceWriter::EXEC_MAPPING) ==
         TraceWriter::RECORD_IN_TRACE) {
       if (st.st_size > 0) {
-        off64_t end = (off64_t)st.st_size - km.file_offset_bytes();
-        t->record_remote(km.start(), min(end, (off64_t)km.size()));
+        off_t end = (off_t)st.st_size - km.file_offset_bytes();
+        t->record_remote(km.start(), min(end, (off_t)km.size()));
       } else {
         // st_size is not valid. Some device files are mmappable but have zero
         // size. We also take this path if there's no file at all (vdso etc).
@@ -6130,6 +6140,58 @@ static bool monitor_fd_for_mapping(RecordTask* mapped_t, int mapped_fd, const st
   return our_mapping_writable;
 }
 
+static bool os_has_broken_zfs() {
+  static bool is_broken = true, did_check = false;
+  if (did_check) {
+    return is_broken;
+  }
+  did_check = true;
+  DIR* zfs_dir = opendir("/sys/module/zfs");
+  if (!zfs_dir) {
+    // No ZFS, so no bug
+    is_broken = false;
+    return false;
+  }
+  ScopedFd version_file_fd =
+      ScopedFd(openat(dirfd(zfs_dir), "version", O_RDONLY));
+  closedir(zfs_dir);
+  char version[50];
+  memset(version, 0, sizeof(version));
+  read(version_file_fd, version, sizeof(version) - 1);
+  int zfs_major = 0, zfs_minor = 0, zfs_patch = 0;
+  if (3 != sscanf(version, "%d.%d.%d", &zfs_major, &zfs_minor, &zfs_patch)) {
+    LOG(warn)
+        << "Failed to parse /sys/module/zfs/version; assuming ZFS is broken";
+    return true;
+  }
+  is_broken = !(zfs_major > 2 || (zfs_major == 2 && zfs_minor > 2));
+  return is_broken;
+}
+
+// On some versions of ZFS, SEEK_HOLE/SEEK_DATA is known to not be reliable
+// and potentially return spurious holes. Such holes would cause trace
+// corruption, so we must skip this optimizations on such ZFS versions.
+static bool may_have_zfs_seek_bug(ScopedFd& fd) {
+  static bool did_warn = false;
+  if (!os_has_broken_zfs())
+    return false;
+  // Check if this file is on ZFS.
+  struct statfs buf;
+  if (0 != fstatfs(fd, &buf)) {
+    // This really shouldn't fail, but let's be conservative
+    LOG(warn) << "Failed to determine file system type for fd";
+    return true;
+  }
+  int bad_file = (buf.f_type == ZFS_SUPER_MAGIC);
+  if (bad_file && !did_warn) {
+    LOG(warn)
+        << "Detected access to file on ZFS < 2.3.0 which has known bugs.\n"
+        << "Sparse file optimizations will be disabled.";
+    did_warn = true;
+  }
+  return bad_file;
+}
+
 // The returned hole offsets are relative to 'offset'
 static vector<WriteHole> find_holes(RecordTask* t, int desc, uint64_t offset, uint64_t size) {
   vector<WriteHole> ret;
@@ -6137,10 +6199,13 @@ static vector<WriteHole> find_holes(RecordTask* t, int desc, uint64_t offset, ui
   if (!fd.is_open()) {
     return ret;
   }
+  if (may_have_zfs_seek_bug(fd)) {
+    return ret;
+  }
   uint64_t file_start = offset;
   uint64_t file_end = offset + size;
   while (offset < file_end) {
-    off64_t r = lseek(fd, offset, SEEK_HOLE);
+    off_t r = lseek(fd, offset, SEEK_HOLE);
     if (r < 0) {
       // SEEK_HOLE not supported?
       return ret;
@@ -6216,7 +6281,7 @@ static void check_outside_mappings(const KernelMapping& tracee_km, const RecordS
 }
 
 static void process_mmap(RecordTask* t, size_t length, int prot, int flags,
-                         int fd, off64_t offset) {
+                         int fd, off_t offset) {
   if (t->regs().syscall_failed()) {
     // We purely emulate failed mmaps.
     return;
@@ -6284,8 +6349,8 @@ static void process_mmap(RecordTask* t, size_t length, int prot, int flags,
                                             TraceWriter::SYSCALL_MAPPING,
                                             !monitor_this_fd) ==
       TraceWriter::RECORD_IN_TRACE) {
-    off64_t end = (off64_t)st.st_size - km.file_offset_bytes();
-    off64_t nbytes = min(end, (off64_t)km.size());
+    off_t end = (off_t)st.st_size - km.file_offset_bytes();
+    off_t nbytes = min(end, (off_t)km.size());
     vector<WriteHole> holes = find_holes(t, fd, km.file_offset_bytes(), (uint64_t)nbytes);
     ssize_t nread = t->record_remote_fallible(addr, nbytes, holes);
     if (!adjusted_size && nread != nbytes) {
@@ -6396,10 +6461,10 @@ static void process_mremap(RecordTask* t, remote_ptr<void> old_addr,
   if (t->trace_writer().write_mapped_region(t, km, st, km.fsname(),
                                             vector<TraceRemoteFd>()) ==
       TraceWriter::RECORD_IN_TRACE) {
-    off64_t end = max<off64_t>(st.st_size - km.file_offset_bytes(), 0);
+    off_t end = max<off_t>(st.st_size - km.file_offset_bytes(), 0);
     // Allow failure; the underlying file may have true zero size, in which
     // case this may try to record unmapped memory.
-    t->record_remote_fallible(km.start(), min(end, (off64_t)km.size()));
+    t->record_remote_fallible(km.start(), min(end, (off_t)km.size()));
   }
 
   // If the original mapping was monitored, we'll continue monitoring it

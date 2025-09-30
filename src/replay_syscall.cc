@@ -216,7 +216,7 @@ template <typename Arch> static void prepare_clone(ReplayTask* t) {
   }
 
   // Get out of the syscall
-  t->exit_syscall();
+  t->exit_syscall(Arch::arch());
 
   ASSERT(t, !t->ptrace_event())
       << "Unexpected ptrace event while waiting for syscall exit; got "
@@ -590,7 +590,7 @@ static void write_mapped_data(ReplayTask* t,
 
 static void finish_private_mmap(ReplayTask* t, AutoRemoteSyscalls& remote,
                                 remote_ptr<void> rec_addr, size_t length,
-                                int prot, int flags, off64_t offset_bytes,
+                                int prot, int flags, off_t offset_bytes,
                                 const KernelMapping& km,
                                 TraceReader::MappedData& data) {
   LOG(debug) << "  finishing private mmap of " << km.fsname();
@@ -614,7 +614,7 @@ static void finish_private_mmap(ReplayTask* t, AutoRemoteSyscalls& remote,
 static void finish_shared_mmap(ReplayTask* t, AutoRemoteSyscalls& remote,
                                remote_ptr<void> rec_addr, size_t length,
                                int prot, int flags, const vector<TraceRemoteFd>& fds,
-                               off64_t offset_bytes,
+                               off_t offset_bytes,
                                const KernelMapping& km,
                                TraceReader::MappedData& data) {
   // Ensure there's a virtual file for the file that was mapped
@@ -672,7 +672,7 @@ static void finish_shared_mmap(ReplayTask* t, AutoRemoteSyscalls& remote,
 
 static void process_mmap(ReplayTask* t, const TraceFrame& trace_frame,
                          size_t length, int prot, int flags, int fd,
-                         off64_t offset_bytes, ReplayTraceStep* step) {
+                         off_t offset_bytes, ReplayTraceStep* step) {
   step->action = TSTEP_RETIRE;
 
   {
@@ -1166,7 +1166,7 @@ static void rep_process_syscall_arch(ReplayTask* t, ReplayTraceStep* step,
   }
 
   /* Manual implementations of irregular syscalls that need to do more during
-   * replay than just modify register and memory state.
+   * replay than just modify registenter_syscaller and memory state.
    * Don't let a negative incoming syscall number be treated as a real
    * system call that we assigned a negative number because it doesn't
    * exist in this architecture.
@@ -1256,8 +1256,8 @@ static void rep_process_syscall_arch(ReplayTask* t, ReplayTraceStep* step,
       if (modified_sys == Arch::mprotect) {
         t->vm()->fixup_mprotect_growsdown_parameters(t);
       }
-      t->enter_syscall();
-      t->exit_syscall();
+      t->enter_syscall(Arch::arch());
+      t->exit_syscall(Arch::arch());
       ASSERT(t, t->regs().syscall_result() == trace_regs.syscall_result());
       if (modified_sys == Arch::mprotect) {
         Registers r2 = t->regs();

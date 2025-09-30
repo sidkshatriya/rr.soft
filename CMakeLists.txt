@@ -47,6 +47,23 @@ if(NOT (CMAKE_C_COMPILER_ID STREQUAL CMAKE_CXX_COMPILER_ID))
   message(FATAL_ERROR "Both C and C++ compilers need to be either both from GNU family or Clang family. They cannot differ")
 endif()
 
+# Require c++17 as minimum
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+
+# Configure so that we use -std=c++17 (as previously done) not -std=gnu++17
+if(NOT DEFINED CMAKE_CXX_EXTENSIONS)
+  set(CMAKE_CXX_EXTENSIONS OFF)
+endif()
+
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Because `CMAKE_CXX_STANDARD_REQUIRED ON` does not enforce this for us.
+if(CMAKE_CXX_STANDARD LESS 17)
+  message(FATAL_ERROR "C++ standard too low: CMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}. Minimum required is C++17.")
+endif()
+
 # "Do not add flags to export symbols from executables without the ENABLE_EXPORTS target property."
 # This avoids linking executables with -rdynamic. -rdynamic has been observed
 # to cause rr_exec_stub to be linked with the dynamic linker with some
@@ -129,7 +146,7 @@ if(${CMAKE_SYSTEM_PROCESSOR} MATCHES x86_64)
   set(SOFTWARE_COUNTERS_STATICALLY_INSTRUMENT_TESTS ON)
 endif()
 
-set(FLAGS_COMMON "-D__USE_LARGEFILE64 -pthread")
+set(FLAGS_COMMON "-D_FILE_OFFSET_BITS=64 -pthread")
 set(supports32bit true)
 set(x86ish false)
 set(has_syscallbuf false)
@@ -164,7 +181,7 @@ endif()
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${FLAGS_COMMON} -Wstrict-prototypes -std=gnu11")
 # Define __STDC_LIMIT_MACROS so |#include <stdint.h>| works as expected.
 # Define __STDC_FORMAT_MACROS so |#include <inttypes.h>| works as expected.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLAGS_COMMON} -D__STDC_LIMIT_MACROS -D__STDC_FORMAT_MACROS -std=c++17 -Wno-error=unused-const-variable")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLAGS_COMMON} -D__STDC_LIMIT_MACROS -D__STDC_FORMAT_MACROS -Wno-error=unused-const-variable")
 
 # We support three build types:
 # DEBUG: suitable for debugging rr
@@ -1433,6 +1450,7 @@ set(BASIC_TESTS
   seccomp_clone_fail
   seccomp_desched
   seccomp_kill_exit
+  seccomp_madvise
   seccomp_null
   seccomp_sigsys_args
   seccomp_sigsys_sigtrap
@@ -1445,6 +1463,7 @@ set(BASIC_TESTS
   send_block
   sendfile
   set_ptracer
+  x86/set_thread_area
   set_tid_address
   setgid
   setgroups
