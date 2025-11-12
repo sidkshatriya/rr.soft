@@ -120,6 +120,10 @@ endif()
 
 find_package(RocksDB REQUIRED)
 
+if(${CMAKE_SYSTEM_PROCESSOR} MATCHES x86_64)
+  find_package(Zydis REQUIRED)
+endif()
+
 add_definitions(-DRR_VERSION="${rr_VERSION_MAJOR}.${rr_VERSION_MINOR}.${rr_VERSION_PATCH}")
 
 execute_process(
@@ -330,13 +334,6 @@ set(REQUIRED_LIBS
   # openssl library libcrypto is required for SHA256
   libcrypto
 )
-
-if(${CMAKE_SYSTEM_PROCESSOR} MATCHES x86_64)
-  set(REQUIRED_LIBS
-    ${REQUIRED_LIBS}
-    zydis
-  )
-endif()
 
 if(NOT ANDROID)
   set(REQUIRED_LIBS
@@ -884,9 +881,9 @@ else()
     ${ZLIB_LDFLAGS}
     ${LIBBPF_LDFLAGS}
     ${LIBCRYPTO_LDFLAGS}
-    ${ZYDIS_LDFLAGS}
     brotli
     RocksDB::rocksdb-shared
+    Zydis::Zydis
   )
 endif()
 
