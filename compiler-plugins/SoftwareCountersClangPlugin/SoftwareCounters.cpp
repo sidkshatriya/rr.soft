@@ -23,6 +23,7 @@
 #include <llvm/Passes/PassPlugin.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
